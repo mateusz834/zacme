@@ -3,7 +3,7 @@ const http = @import("./http.zig");
 
 pub const log = struct {
     pub fn err(comptime fmt: []const u8) void {
-		errf(fmt, .{});
+        errf(fmt, .{});
     }
     pub fn errf(comptime fmt: []const u8, args: anytype) void {
         std.debug.print("Error: " ++ fmt ++ "\n", args);
@@ -17,8 +17,8 @@ pub fn json_pretty(allocator: std.mem.Allocator, inJson: []const u8) ![]const u8
     var valTree = try parser.parse(inJson);
     defer valTree.deinit();
 
-    var json = try std.json.stringifyAlloc(allocator, valTree.root, .{ .whitespace = .{ .indent = .{.Space = 2} } });
-	return json;
+    var json = try std.json.stringifyAlloc(allocator, valTree.root, .{ .whitespace = .{ .indent = .{ .Space = 2 } } });
+    return json;
 }
 
 const curl = @cImport({
@@ -26,14 +26,14 @@ const curl = @cImport({
 });
 
 pub fn main() !u8 {
-	defer http.deinit();
+    defer http.deinit();
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-	var out = try http.send_query(allocator);
-	defer allocator.free(out);
+    var out = try http.send_query(allocator);
+    defer allocator.free(out);
 
     const payload =
         \\{   "vals": {
@@ -51,8 +51,7 @@ pub fn main() !u8 {
 
     std.debug.print("{s}\n", .{str});
 
-
-	return 0;
+    return 0;
 }
 
 fn writeToArrayListCallback(data: *anyopaque, size: c_uint, nmemb: c_uint, user_data: *anyopaque) callconv(.C) c_uint {
@@ -62,7 +61,6 @@ fn writeToArrayListCallback(data: *anyopaque, size: c_uint, nmemb: c_uint, user_
     return nmemb * size;
 }
 
-
 const cURL = @cImport({
     @cInclude("curl/curl.h");
 });
@@ -71,7 +69,6 @@ pub fn sendRequest() !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena_state.deinit();
     const allocator = arena_state.allocator();
-
 
     // curl easy handle init, or fail
     const handle = cURL.curl_easy_init() orelse return error.CURLHandleInitFailed;
@@ -100,4 +97,3 @@ pub fn sendRequest() !void {
     std.log.info("Got response of {d} bytes", .{response_buffer.items.len});
     std.debug.print("{s}\n", .{response_buffer.items});
 }
-
