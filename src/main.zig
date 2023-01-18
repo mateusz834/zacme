@@ -1,6 +1,7 @@
 const std = @import("std");
 const log = @import("./log.zig");
 const http = @import("./http.zig");
+const crypto = @import("./crypto.zig");
 
 pub fn json_pretty(allocator: std.mem.Allocator, inJson: []const u8) ![]const u8 {
     var parser = std.json.Parser.init(allocator, true);
@@ -17,6 +18,13 @@ const curl = @cImport({
     @cInclude("curl/curl.h");
 });
 
+const openssl = @cImport({
+    @cInclude("openssl/crypto.h");
+    @cInclude("openssl/evp.h");
+    @cInclude("openssl/rsa.h");
+    @cInclude("openssl.h");
+});
+
 pub fn main() !u8 {
     defer http.deinit();
 
@@ -27,6 +35,52 @@ pub fn main() !u8 {
     var out = try http.send_query(allocator);
     defer allocator.free(out);
 
+    log.stdout.print("generating RSA-2048");
+    var rsa = try crypto.Key.generate(.{ .RSA = 2048 });
+
+    var sign = try rsa.sign(allocator, "siema");
+    defer allocator.free(sign);
+
+    log.stdout.printf("signature: {x}", .{std.fmt.fmtSliceHexLower(sign)});
+
+    log.stdout.print("generating ECDSA P256");
+    var ecdsa = try crypto.Key.generate(.{ .ECDSA = .P256 });
+    _ = ecdsa;
+
+    var pem = try std.fs.cwd().readFileAlloc(allocator, "./file.pem", 11111111111);
+    defer allocator.free(pem);
+
+    var key = try crypto.Key.from_pem(pem);
+    log.stderr.printf("key type: {}", .{key.type});
+
+    //var md = openssl.EVP_MD_CTX_new() orelse {
+    //    log.err("failed while creating EVP_MD_CTX");
+    //    return error.EVPMDNEw;
+    //};
+    //var pctx: ?*openssl.EVP_PKEY_CTX = null;
+
+    //var signOut = openssl.EVP_DigestSignInit(md, &pctx, openssl.EVP_sha256(), null, rsa);
+    //if (signOut <= 0) {
+    //    openssl.EVP_MD_CTX_free(md);
+    //    return error.skfshi;
+    //}
+
+    //var padOut = openssl.EVP_PKEY_CTX_set_rsa_padding(pctx, openssl.RSA_PKCS1_PADDING);
+    //if (padOut <= 0) {
+    //    openssl.EVP_MD_CTX_free(md);
+    //    return error.skfshi;
+    //}
+
+    //padOut = openssl.EVP_DigestUpdate(md, "siema", 5);
+    //if (padOut <= 0) {
+    //    openssl.EVP_MD_CTX_free(md);
+    //    return error.skfshi;
+    //}
+
+    return 0;
+}
+
+pub fn sss(allocator: std.mem.Allocator) !u8 {
     const payload =
         \\{   "vals": {
         \\        "testing": 1,

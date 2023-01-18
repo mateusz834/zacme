@@ -20,7 +20,7 @@ pub const stderr = struct {
 
 pub const stdout = struct {
     pub fn print(comptime fmt: []const u8) void {
-        print(fmt, .{});
+        printf(fmt, .{});
     }
 
     pub fn printf(comptime fmt: []const u8, args: anytype) void {

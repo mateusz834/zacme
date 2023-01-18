@@ -15,8 +15,14 @@ pub fn build(b: *std.build.Builder) void {
     exe.setTarget(target);
     exe.setBuildMode(mode);
 	exe.linkLibC();
-	exe.addIncludePath("/usr/include");
+
+	exe.addSystemIncludePath("/usr/include");
+	exe.linkSystemLibrary("libcrypto");
 	exe.linkSystemLibrary("libcurl");
+
+	exe.addCSourceFile("./src/openssl.c", &[_][]const u8 {});
+	exe.addIncludePath("./src");
+
     exe.install();
 
     const run_cmd = exe.run();
