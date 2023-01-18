@@ -1,14 +1,6 @@
 const std = @import("std");
+const log = @import("./log.zig");
 const http = @import("./http.zig");
-
-pub const log = struct {
-    pub fn err(comptime fmt: []const u8) void {
-        errf(fmt, .{});
-    }
-    pub fn errf(comptime fmt: []const u8, args: anytype) void {
-        std.debug.print("Error: " ++ fmt ++ "\n", args);
-    }
-};
 
 pub fn json_pretty(allocator: std.mem.Allocator, inJson: []const u8) ![]const u8 {
     var parser = std.json.Parser.init(allocator, true);
@@ -49,7 +41,7 @@ pub fn main() !u8 {
     var str = try json_pretty(allocator, payload);
     defer allocator.free(str);
 
-    std.debug.print("{s}\n", .{str});
+    log.stdout.printf("{s}", .{str});
 
     return 0;
 }

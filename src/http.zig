@@ -6,6 +6,8 @@ const curl = @cImport({
 });
 
 var handle: ?*curl.CURL = null;
+var errBuf: [curl.CURL_ERROR_SIZE:0]u8 = undefined;
+var verbose = true;
 
 pub fn deinit() void {
     if (handle != null) {
@@ -30,10 +32,12 @@ fn init() !void {
         return error.CURLFailedHandleInit;
     };
 
-    ret = curl.curl_easy_setopt(handle, curl.CURLOPT_VERBOSE, @intCast(c_long, 1));
-    if (ret != curl.CURLE_OK) {
-        log.errf("failed to set libcurl debug: {s}", .{curl.curl_easy_strerror(ret)});
-        return error.CURLFailedSetURL;
+    if (verbose) {
+        ret = curl.curl_easy_setopt(handle, curl.CURLOPT_VERBOSE, @intCast(c_long, 1));
+        if (ret != curl.CURLE_OK) {
+            log.errf("failed to set libcurl debug: {s}", .{curl.curl_easy_strerror(ret)});
+            return error.CURLFailedSetURL;
+        }
     }
 
     ret = curl.curl_easy_setopt(handle, curl.CURLOPT_SSLVERSION, curl.CURL_SSLVERSION_TLSv1_2);
@@ -48,10 +52,16 @@ fn init() !void {
         return error.CURLFailedSetURL;
     }
 
+    ret = curl.curl_easy_setopt(handle, curl.CURLOPT_ERRORBUFFER, &errBuf[0]);
+    if (ret != curl.CURLE_OK) {
+        log.errf("failed to set libcurl protocols: {s}", .{curl.curl_easy_strerror(ret)});
+        return error.CURLFailedSetURL;
+    }
+
     // allow only the use of https.
     ret = curl.curl_easy_setopt(handle, curl.CURLOPT_PROTOCOLS_STR, "https");
     if (ret != curl.CURLE_OK) {
-        log.errf("failed to set libcurl write function: {s}", .{curl.curl_easy_strerror(ret)});
+        log.errf("failed to set libcurl protocols: {s}", .{curl.curl_easy_strerror(ret)});
         return error.CURLFailedSetURL;
     }
 }
@@ -59,7 +69,7 @@ fn init() !void {
 pub fn send_query(allocator: std.mem.Allocator) ![]u8 {
     try init();
 
-    var ret = curl.curl_easy_setopt(handle, curl.CURLOPT_URL, "https://google.com");
+    var ret = curl.curl_easy_setopt(handle, curl.CURLOPT_URL, "https://acme-staging-v02.api.letsencrypt.org/directory");
     if (ret != curl.CURLE_OK) {
         log.errf("failed to set libcurl url: {s}", .{curl.curl_easy_strerror(ret)});
         return error.CURLFailedSetURL;
@@ -75,9 +85,19 @@ pub fn send_query(allocator: std.mem.Allocator) ![]u8 {
     }
 
     ret = curl.curl_easy_perform(handle);
+    if (ret != curl.CURLE_OK) {
+        log.errf("libcurl failed while performing query: {s}", .{errBuf});
+        return error.CURLPerformFailed;
+    }
 
-    if (data.err != null)
+    if (data.err != null) {
+        log.errf("failed while writing data to buffer: {}", .{data.err.?});
         return data.err.?;
+    }
+
+    if (verbose) {
+        log.stderr.printf("{s}", .{data.list.items});
+    }
 
     return try data.list.toOwnedSlice();
 }
