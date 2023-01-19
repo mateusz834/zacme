@@ -189,15 +189,35 @@ pub const Key = struct {
         // What a mess here ....
         var dataPtr: [1][*c]const u8 = [1][*]const u8{sig.ptr};
         var dataPtr2: [*c][*c]const u8 = dataPtr[0..];
-        ecsig = openssl.d2i_ECDSA_SIG(&ecsig, dataPtr2, @intCast(c_long, sig.len));
-        var r = openssl.ECDSA_SIG_get0_r(ecsig);
-        var s = openssl.ECDSA_SIG_get0_s(ecsig);
+        _ = openssl.d2i_ECDSA_SIG(&ecsig, dataPtr2, @intCast(c_long, sig.len)) orelse {
+            log.err("failed while decoding the DER-encoded ecdsa signature");
+            return error.d21_ECDSA_SIG_Failed;
+		};
 
-        var csize = curve.size();
+        var r = openssl.ECDSA_SIG_get0_r(ecsig) orelse {
+            log.err("failed while getting the ecdsa (r) coordinate");
+            return error.ECDSA_SIG_get0_r_Failed;
+		};
 
-        var jwsSig = try allocator.alloc(u8, csize * 2);
-        _ = openssl.BN_bn2binpad(r, &jwsSig[0], @intCast(c_int, csize));
-        _ = openssl.BN_bn2binpad(s, &jwsSig[csize], @intCast(c_int, csize));
+        var s = openssl.ECDSA_SIG_get0_s(ecsig) orelse {
+            log.err("failed while getting the ecdsa (s) coordinate");
+            return error.ECDSA_SIG_get0_s_Failed;
+		};
+
+        var size = curve.size();
+
+        var jwsSig = try allocator.alloc(u8, size * 2);
+        var ret  = openssl.BN_bn2binpad(r, &jwsSig[0], @intCast(c_int, size));
+		if (ret <= 0) {
+            log.err("failed while getting the ecdsa coordinate (r) from bignum");
+            return error.BN_bn2binpad_Failed;
+		}
+
+        ret = openssl.BN_bn2binpad(s, &jwsSig[size], @intCast(c_int, size));
+		if (ret <= 0) {
+            log.err("failed while getting the ecdsa coordinate (s) from bignum");
+            return error.BN_bn2binpad_Failed;
+		}
 
         return jwsSig;
     }
