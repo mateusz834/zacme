@@ -52,6 +52,9 @@ pub fn main() !u8 {
 
     var key = try crypto.Key.from_pem(pem);
     log.stderr.printf("key type: {}", .{key.type});
+    var pem2 = try key.to_pem(allocator);
+    defer allocator.free(pem2);
+    log.stderr.printf("{s}", .{pem2});
 
     //var md = openssl.EVP_MD_CTX_new() orelse {
     //    log.err("failed while creating EVP_MD_CTX");

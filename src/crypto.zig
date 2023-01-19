@@ -72,36 +72,56 @@ pub const Key = struct {
             return error.PEMReadBioPrivateKeyFailed;
         };
 
-        switch (openssl.EVP_PKEY_get_id(pkey)) {
-            openssl.EVP_PKEY_RSA => {
-                var rsa = openssl.EVP_PKEY_get1_RSA(pkey) orelse {
-                    log.err("failed while parsing PEM encoded RSA private key");
-                    return error.EVPPkeyGet1RSAFailed;
-                };
-                var bits = openssl.RSA_bits(rsa);
-                return Key{ .type = .{ .RSA = @intCast(u32, bits) }, .pkey = pkey };
-            },
-            openssl.EVP_PKEY_EC => {
-                var ec_str_buf: [Type.Curve.max_str_size:0]u8 = undefined;
-                var size: usize = 0;
-                var ret = openssl.EVP_PKEY_get_group_name(pkey, &ec_str_buf[0], ec_str_buf.len, &size);
-                if (ret <= 0) {
-                    log.err("unknown private key curve found inside the pem file");
-                    return error.UnknownECCurve;
-                }
-                var curve = try Type.Curve.from_str(ec_str_buf[0..size]);
-                return Key{ .type = .{ .ECDSA = curve }, .pkey = pkey };
-            },
+        return switch (openssl.EVP_PKEY_get_id(pkey)) {
+            openssl.EVP_PKEY_RSA => try from_pem_rsa(pkey),
+            openssl.EVP_PKEY_EC => try from_pem_ecdsa(pkey),
             else => {
                 log.err("unknown private key type found inside the pem file");
                 return error.UnknownPrivKey;
             },
+        };
+    }
+
+    fn from_pem_rsa(pkey: *openssl.EVP_PKEY) !Key {
+        var rsa = openssl.EVP_PKEY_get1_RSA(pkey) orelse {
+            log.err("failed while parsing PEM encoded RSA private key");
+            return error.EVPPkeyGet1RSAFailed;
+        };
+        var bits = openssl.RSA_bits(rsa);
+        return Key{ .type = .{ .RSA = @intCast(u32, bits) }, .pkey = pkey };
+    }
+
+    fn from_pem_ecdsa(pkey: *openssl.EVP_PKEY) !Key {
+        var ec_str_buf: [Type.Curve.max_str_size:0]u8 = undefined;
+        var size: usize = 0;
+        var ret = openssl.EVP_PKEY_get_group_name(pkey, &ec_str_buf[0], ec_str_buf.len, &size);
+        if (ret <= 0) {
+            log.err("unknown private key curve found inside the pem file");
+            return error.UnknownECCurve;
         }
+        var curve = try Type.Curve.from_str(ec_str_buf[0..size]);
+        return Key{ .type = .{ .ECDSA = curve }, .pkey = pkey };
     }
 
     pub fn to_pem(self: *Key, allocator: std.mem.Allocator) ![]u8 {
-        _ = allocator;
-        _ = self;
+        var bio = openssl.BIO_new(openssl.BIO_s_mem()) orelse {
+            log.err("falied while creating in-memory BIO");
+            return error.PEM_write_bio_PrivateKeyFailure;
+        };
+        defer openssl.BIO_vfree(bio);
+
+        var ret = openssl.PEM_write_bio_PrivateKey(bio, self.pkey, null, null, 0, null, null);
+        if (ret <= 0) {
+            log.err("failed while encoding to PEM");
+            return error.PEM_write_bio_PrivateKeyFailure;
+        }
+
+        var buf: ?[*]u8 = null;
+        var len = openssl.BIO_get_mem_data(bio, &buf);
+
+        var pem = try allocator.alloc(u8, @intCast(usize, len));
+        std.mem.copy(u8, pem, buf.?[0..@intCast(usize, len)]);
+        return pem;
     }
 
     fn generate_rsa(size: u32) !?*openssl.EVP_PKEY {
@@ -119,6 +139,9 @@ pub const Key = struct {
             .P384 => "secp384r1",
             .P521 => "secp521r1",
         };
+
+        // Wrapper for openssl.EVP_EC_gen(), zig cannot translate that macro.
+        // Defined in openssl.c.
         return openssl.gen_ECDSA(curve_name) orelse {
             log.err("failed while generating ECDSA key");
             return error.ECDSAgen;
