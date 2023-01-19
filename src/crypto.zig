@@ -4,8 +4,8 @@ const openssl = @cImport({
     @cInclude("openssl/ec.h");
     @cInclude("openssl/pem.h");
     @cInclude("openssl/bio.h");
-	@cInclude("openssl/err.h");
-	@cInclude("openssl/objects.h");
+    @cInclude("openssl/err.h");
+    @cInclude("openssl/objects.h");
     @cInclude("openssl.h");
 });
 
@@ -92,7 +92,7 @@ pub const Key = struct {
         // Wrapper for openssl.EVP_RSA_gen(), zig cannot translate that macro.
         // Defined in openssl.c.
         return openssl.gen_RSA(size) orelse {
-			openssl_print_error("failed while generating RSA-{} key", .{size});
+            openssl_print_error("failed while generating RSA-{} key", .{size});
             return error.RSAKeyGenerationFailure;
         };
     }
@@ -107,29 +107,29 @@ pub const Key = struct {
         // Wrapper for openssl.EVP_EC_gen(), zig cannot translate that macro.
         // Defined in openssl.c.
         return openssl.gen_ECDSA(curve_name) orelse {
-			openssl_print_error("failed while generating ECDSA on curve: '{s}'", .{curve_name});
+            openssl_print_error("failed while generating ECDSA on curve: '{s}'", .{curve_name});
             return error.ECDSAKeyGenerationFailure;
         };
     }
 
     pub fn from_pem(data: []const u8) !Key {
         var bio = openssl.BIO_new_mem_buf(&data[0], @intCast(c_int, data.len)) orelse {
-			openssl_print_error("failed while creating in-mem BIO buffer for PEM parsing", .{});
+            openssl_print_error("failed while creating in-mem BIO buffer for PEM parsing", .{});
             return error.BIONewMemBuf;
         };
         defer _ = openssl.BIO_free(bio);
 
         var pkey = openssl.PEM_read_bio_PrivateKey(bio, null, null, null) orelse {
-			openssl_print_error("failed while parsing PEM encoded private key", .{});
+            openssl_print_error("failed while parsing PEM encoded private key", .{});
             return error.PEMReadBioPrivateKeyFailed;
         };
 
-		var nid = openssl.EVP_PKEY_get_id(pkey);
+        var nid = openssl.EVP_PKEY_get_id(pkey);
         return switch (nid) {
             openssl.EVP_PKEY_RSA => try from_pem_rsa(pkey),
             openssl.EVP_PKEY_EC => try from_pem_ecdsa(pkey),
             else => {
-				log.errf("unsupported private key type found inside the pem file: {s}", .{openssl.OBJ_nid2sn(nid)});
+                log.errf("unsupported private key type found inside the pem file: {s}", .{openssl.OBJ_nid2sn(nid)});
                 return error.UnknownPrivKey;
             },
         };
@@ -205,7 +205,6 @@ pub const Key = struct {
 
         var ecsig = openssl.ECDSA_SIG_new();
         defer openssl.ECDSA_SIG_free(ecsig);
-
 
         // What a mess here ....
         var dataPtr: [1][*c]const u8 = [1][*]const u8{sig.ptr};
@@ -283,21 +282,21 @@ pub const Key = struct {
         return sig;
     }
 
-	fn openssl_print_error(comptime fmt: []const u8, args: anytype) void {
-		var opensslError = false;
-		while (true) {
-			var e = openssl.ERR_get_error();
-			if (e == 0)
-				break;
+    fn openssl_print_error(comptime fmt: []const u8, args: anytype) void {
+        var opensslError = false;
+        while (true) {
+            var e = openssl.ERR_get_error();
+            if (e == 0)
+                break;
 
-			opensslError = true;
-			var stderr = std.io.getStdErr().writer();
-			stderr.print("Error: " ++ fmt , args) catch return;
-			stderr.print(": {s}\n" , .{openssl.ERR_error_string(e,null)}) catch return;
-		}
+            opensslError = true;
+            var stderr = std.io.getStdErr().writer();
+            stderr.print("Error: " ++ fmt, args) catch return;
+            stderr.print(": {s}\n", .{openssl.ERR_error_string(e, null)}) catch return;
+        }
 
-		if (!opensslError) {
-			log.errf(fmt, args);
-		}
-	}
+        if (!opensslError) {
+            log.errf(fmt, args);
+        }
+    }
 };
