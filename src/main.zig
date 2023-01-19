@@ -32,8 +32,8 @@ pub fn main() !u8 {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var out = try http.send_query(allocator);
-    defer allocator.free(out);
+    //var out = try http.send_query(allocator);
+    //defer allocator.free(out);
 
     log.stdout.print("generating RSA-2048");
     var rsa = try crypto.Key.generate(.{ .RSA = 2048 });
