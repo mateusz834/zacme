@@ -54,6 +54,13 @@ pub const Key = struct {
                     .P521 => openssl.EVP_sha512(),
                 };
             }
+            pub fn size(self: *const Curve) usize {
+                return switch (self.*) {
+                    .P256 => 32,
+                    .P384 => 48,
+                    .P521 => 66,
+                };
+            }
         };
     };
 
@@ -235,12 +242,30 @@ pub const Key = struct {
         }
 
         var sig = try allocator.alloc(u8, size);
+        defer allocator.free(sig);
+
         ret = openssl.EVP_DigestSignFinal(md_ctx, &sig[0], &size);
         if (ret <= 0) {
             log.err("failed while copying the ECDSA signature");
             return error.EVPDigestSignFinalFailed;
         }
 
-        return sig;
+        var ecsig = openssl.ECDSA_SIG_new();
+        defer openssl.ECDSA_SIG_free(ecsig);
+
+        // What a mess here ....
+        var dataPtr: [1][*c]const u8 = [1][*]const u8{sig.ptr};
+        var dataPtr2: [*c][*c]const u8 = dataPtr[0..];
+        ecsig = openssl.d2i_ECDSA_SIG(&ecsig, dataPtr2, @intCast(c_long, sig.len));
+        var r = openssl.ECDSA_SIG_get0_r(ecsig);
+        var s = openssl.ECDSA_SIG_get0_s(ecsig);
+
+        var csize = curve.size();
+
+        var jwsSig = try allocator.alloc(u8, csize * 2);
+        _ = openssl.BN_bn2binpad(r, &jwsSig[0], @intCast(c_int, csize));
+        _ = openssl.BN_bn2binpad(s, &jwsSig[csize], @intCast(c_int, csize));
+
+        return jwsSig;
     }
 };
