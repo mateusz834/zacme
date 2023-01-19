@@ -176,79 +176,12 @@ pub const Key = struct {
     }
 
     fn sign_rsa(rsa: *openssl.EVP_PKEY, allocator: std.mem.Allocator, data: []const u8) ![]u8 {
-        var md_ctx = openssl.EVP_MD_CTX_create() orelse {
-            log.err("failed while creating the RSA EVP_MD_CTX");
-            return error.EVPDigestSignInitFailed;
-        };
-        defer openssl.EVP_MD_CTX_free(md_ctx);
-
-        var evp_pkey: ?*openssl.EVP_PKEY_CTX = null;
-        var ret = openssl.EVP_DigestSignInit(md_ctx, &evp_pkey, openssl.EVP_sha256(), null, rsa);
-        if (ret <= 0) {
-            log.err("failed while creating the RSA DigestSign");
-            return error.EVPDigestSignInitFailed;
-        }
-
-        ret = openssl.EVP_DigestSignUpdate(md_ctx, &data[0], data.len);
-        if (ret <= 0) {
-            log.err("failed while updating the RSA EVP digest");
-            return error.EVPDigestSignUpdateFailed;
-        }
-
-        var size: usize = 0;
-        ret = openssl.EVP_DigestSignFinal(md_ctx, null, &size);
-        if (ret <= 0) {
-            log.err("failed while determining the RSA signature size");
-            return error.EVPDigestSignFinalFailed;
-        }
-
-        var sig = try allocator.alloc(u8, size);
-        ret = openssl.EVP_DigestSignFinal(md_ctx, &sig[0], &size);
-        if (ret <= 0) {
-            log.err("failed while copying the RSA signature");
-            return error.EVPDigestSignFinalFailed;
-        }
-
-        return sig;
+		return sign_evp(rsa,openssl.EVP_sha256().?, allocator, data);
     }
 
     fn sign_ecdsa(rsa: *openssl.EVP_PKEY, curve: Type.Curve, allocator: std.mem.Allocator, data: []const u8) ![]u8 {
-        var hash = curve.signing_hash();
-
-        var md_ctx = openssl.EVP_MD_CTX_create() orelse {
-            log.err("failed while creating the ECDSA EVP_MD_CTX");
-            return error.EVPDigestSignInitFailed;
-        };
-        defer openssl.EVP_MD_CTX_free(md_ctx);
-
-        var evp_pkey: ?*openssl.EVP_PKEY_CTX = null;
-        var ret = openssl.EVP_DigestSignInit(md_ctx, &evp_pkey, hash, null, rsa);
-        if (ret <= 0) {
-            log.err("failed while creating the ECDSA DigestSign");
-            return error.EVPDigestSignInitFailed;
-        }
-
-        ret = openssl.EVP_DigestSignUpdate(md_ctx, &data[0], data.len);
-        if (ret <= 0) {
-            log.err("failed while updating the ECDSA EVP digest");
-            return error.EVPDigestSignUpdateFailed;
-        }
-
-        var size: usize = 0;
-        ret = openssl.EVP_DigestSignFinal(md_ctx, null, &size);
-        if (ret <= 0) {
-            log.err("failed while determining the ECDSA signature size");
-            return error.EVPDigestSignFinalFailed;
-        }
-
-        var sig = try allocator.alloc(u8, size);
+		var sig = try sign_evp(rsa, curve.signing_hash().?, allocator, data);
         defer allocator.free(sig);
-
-        ret = openssl.EVP_DigestSignFinal(md_ctx, &sig[0], &size);
-        if (ret <= 0) {
-            log.err("failed while copying the ECDSA signature");
-            return error.EVPDigestSignFinalFailed;
-        }
 
         var ecsig = openssl.ECDSA_SIG_new();
         defer openssl.ECDSA_SIG_free(ecsig);
@@ -268,4 +201,42 @@ pub const Key = struct {
 
         return jwsSig;
     }
+
+    fn sign_evp(key: *openssl.EVP_PKEY, hash: *const openssl.EVP_MD, allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+        var md_ctx = openssl.EVP_MD_CTX_create() orelse {
+            log.err("failed while creating the EVP_MD_CTX");
+            return error.EVPDigestSignInitFailed;
+        };
+        defer openssl.EVP_MD_CTX_free(md_ctx);
+
+        var evp_pkey: ?*openssl.EVP_PKEY_CTX = null;
+        var ret = openssl.EVP_DigestSignInit(md_ctx, &evp_pkey, hash, null, key);
+        if (ret <= 0) {
+            log.err("failed while creating the DigestSign");
+            return error.EVPDigestSignInitFailed;
+        }
+
+        ret = openssl.EVP_DigestSignUpdate(md_ctx, &data[0], data.len);
+        if (ret <= 0) {
+            log.err("failed while updating the EVP digest");
+            return error.EVPDigestSignUpdateFailed;
+        }
+
+        var size: usize = 0;
+        ret = openssl.EVP_DigestSignFinal(md_ctx, null, &size);
+        if (ret <= 0) {
+            log.err("failed while determining the signature size");
+            return error.EVPDigestSignFinalFailed;
+        }
+
+        var sig = try allocator.alloc(u8, size);
+
+        ret = openssl.EVP_DigestSignFinal(md_ctx, &sig[0], &size);
+        if (ret <= 0) {
+            log.err("failed while copying the signature");
+            return error.EVPDigestSignFinalFailed;
+        }
+
+		return sig;
+	}
 };
