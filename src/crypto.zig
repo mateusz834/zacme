@@ -176,11 +176,11 @@ pub const Key = struct {
     }
 
     fn sign_rsa(rsa: *openssl.EVP_PKEY, allocator: std.mem.Allocator, data: []const u8) ![]u8 {
-		return sign_evp(rsa,openssl.EVP_sha256().?, allocator, data);
+        return sign_evp(rsa, openssl.EVP_sha256().?, allocator, data);
     }
 
     fn sign_ecdsa(rsa: *openssl.EVP_PKEY, curve: Type.Curve, allocator: std.mem.Allocator, data: []const u8) ![]u8 {
-		var sig = try sign_evp(rsa, curve.signing_hash().?, allocator, data);
+        var sig = try sign_evp(rsa, curve.signing_hash().?, allocator, data);
         defer allocator.free(sig);
 
         var ecsig = openssl.ECDSA_SIG_new();
@@ -192,32 +192,32 @@ pub const Key = struct {
         _ = openssl.d2i_ECDSA_SIG(&ecsig, dataPtr2, @intCast(c_long, sig.len)) orelse {
             log.err("failed while decoding the DER-encoded ecdsa signature");
             return error.d21_ECDSA_SIG_Failed;
-		};
+        };
 
         var r = openssl.ECDSA_SIG_get0_r(ecsig) orelse {
             log.err("failed while getting the ecdsa (r) coordinate");
             return error.ECDSA_SIG_get0_r_Failed;
-		};
+        };
 
         var s = openssl.ECDSA_SIG_get0_s(ecsig) orelse {
             log.err("failed while getting the ecdsa (s) coordinate");
             return error.ECDSA_SIG_get0_s_Failed;
-		};
+        };
 
         var size = curve.size();
 
         var jwsSig = try allocator.alloc(u8, size * 2);
-        var ret  = openssl.BN_bn2binpad(r, &jwsSig[0], @intCast(c_int, size));
-		if (ret <= 0) {
+        var ret = openssl.BN_bn2binpad(r, &jwsSig[0], @intCast(c_int, size));
+        if (ret <= 0) {
             log.err("failed while getting the ecdsa coordinate (r) from bignum");
             return error.BN_bn2binpad_Failed;
-		}
+        }
 
         ret = openssl.BN_bn2binpad(s, &jwsSig[size], @intCast(c_int, size));
-		if (ret <= 0) {
+        if (ret <= 0) {
             log.err("failed while getting the ecdsa coordinate (s) from bignum");
             return error.BN_bn2binpad_Failed;
-		}
+        }
 
         return jwsSig;
     }
@@ -257,6 +257,6 @@ pub const Key = struct {
             return error.EVPDigestSignFinalFailed;
         }
 
-		return sig;
-	}
+        return sig;
+    }
 };
