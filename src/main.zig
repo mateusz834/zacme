@@ -37,11 +37,12 @@ pub fn main() !u8 {
 
     log.stdout.print("generating RSA-2048");
     var rsa = try crypto.Key.generate(.{ .RSA = 2048 });
+    _ = rsa;
 
-    var sign = try rsa.sign(allocator, "siema");
-    defer allocator.free(sign);
+    //var sign = try rsa.sign(allocator, "siema");
+    //defer allocator.free(sign);
 
-    log.stdout.printf("signature: {x}", .{std.fmt.fmtSliceHexLower(sign)});
+    //log.stdout.printf("signature: {x}", .{std.fmt.fmtSliceHexLower(sign)});
 
     log.stdout.print("generating ECDSA P256");
     var ecdsa = try crypto.Key.generate(.{ .ECDSA = .P256 });

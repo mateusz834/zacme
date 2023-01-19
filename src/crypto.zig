@@ -4,6 +4,8 @@ const openssl = @cImport({
     @cInclude("openssl/ec.h");
     @cInclude("openssl/pem.h");
     @cInclude("openssl/bio.h");
+	@cInclude("openssl/err.h");
+	@cInclude("openssl/objects.h");
     @cInclude("openssl.h");
 });
 
@@ -23,11 +25,22 @@ pub const Key = struct {
             P384,
             P521,
 
-            // TODO: comptime
-            pub const max_str_size = 10;
+            // max_str_size is the max possible length of a string returned by as_str().
+            pub const max_str_size = lbl: {
+                switch (@typeInfo(Curve)) {
+                    .Enum => |enumInfo| {
+                        var max = 0;
+                        for (enumInfo.fields) |field| {
+                            max = @max(max, @intToEnum(Curve, field.value).as_str().len);
+                        }
+                        break :lbl max;
+                    },
+                    else => unreachable,
+                }
+            };
 
-            pub fn as_str(self: *const Curve) []const u8 {
-                return switch (self.*) {
+            pub fn as_str(self: Curve) []const u8 {
+                return switch (self) {
                     .P256 => "prime256v1",
                     .P384 => "secp384r1",
                     .P521 => "secp521r1",
@@ -35,27 +48,26 @@ pub const Key = struct {
             }
 
             pub fn from_str(str: []const u8) !Curve {
-                if (std.mem.eql(u8, str, "prime256v1")) {
+                if (std.mem.eql(u8, str, Curve.P256.as_str())) {
                     return Curve.P256;
-                }
-                if (std.mem.eql(u8, str, "secp384r1")) {
+                } else if (std.mem.eql(u8, str, Curve.P384.as_str())) {
                     return Curve.P384;
-                }
-                if (std.mem.eql(u8, str, "secp521r1")) {
+                } else if (std.mem.eql(u8, str, Curve.P521.as_str())) {
                     return Curve.P521;
                 }
-                return error.UnknownECCurve;
+                return error.UnknownCurve;
             }
 
-            pub fn signing_hash(self: *const Curve) ?*const openssl.EVP_MD {
-                return switch (self.*) {
+            pub fn signing_hash(self: Curve) ?*const openssl.EVP_MD {
+                return switch (self) {
                     .P256 => openssl.EVP_sha256(),
                     .P384 => openssl.EVP_sha384(),
                     .P521 => openssl.EVP_sha512(),
                 };
             }
-            pub fn size(self: *const Curve) usize {
-                return switch (self.*) {
+
+            pub fn size(self: Curve) usize {
+                return switch (self) {
                     .P256 => 32,
                     .P384 => 48,
                     .P521 => 66,
@@ -80,7 +92,7 @@ pub const Key = struct {
         // Wrapper for openssl.EVP_RSA_gen(), zig cannot translate that macro.
         // Defined in openssl.c.
         return openssl.gen_RSA(size) orelse {
-            log.errf("failed while generating RSA-{} key", .{size});
+			openssl_print_error("failed while generating RSA-{} key", .{size});
             return error.RSAKeyGenerationFailure;
         };
     }
@@ -95,28 +107,29 @@ pub const Key = struct {
         // Wrapper for openssl.EVP_EC_gen(), zig cannot translate that macro.
         // Defined in openssl.c.
         return openssl.gen_ECDSA(curve_name) orelse {
-            log.err("failed while generating ECDSA key");
-            return error.ECDSAgen;
+			openssl_print_error("failed while generating ECDSA on curve: '{s}'", .{curve_name});
+            return error.ECDSAKeyGenerationFailure;
         };
     }
 
     pub fn from_pem(data: []const u8) !Key {
         var bio = openssl.BIO_new_mem_buf(&data[0], @intCast(c_int, data.len)) orelse {
-            log.err("failed while parsing PEM encoded private key");
+			openssl_print_error("failed while creating in-mem BIO buffer for PEM parsing", .{});
             return error.BIONewMemBuf;
         };
         defer _ = openssl.BIO_free(bio);
 
         var pkey = openssl.PEM_read_bio_PrivateKey(bio, null, null, null) orelse {
-            log.err("failed while parsing PEM encoded private key");
+			openssl_print_error("failed while parsing PEM encoded private key", .{});
             return error.PEMReadBioPrivateKeyFailed;
         };
 
-        return switch (openssl.EVP_PKEY_get_id(pkey)) {
+		var nid = openssl.EVP_PKEY_get_id(pkey);
+        return switch (nid) {
             openssl.EVP_PKEY_RSA => try from_pem_rsa(pkey),
             openssl.EVP_PKEY_EC => try from_pem_ecdsa(pkey),
             else => {
-                log.err("unknown private key type found inside the pem file");
+				log.errf("unsupported private key type found inside the pem file: {s}", .{openssl.OBJ_nid2sn(nid)});
                 return error.UnknownPrivKey;
             },
         };
@@ -134,12 +147,19 @@ pub const Key = struct {
     fn from_pem_ecdsa(pkey: *openssl.EVP_PKEY) !Key {
         var ec_str_buf: [Type.Curve.max_str_size:0]u8 = undefined;
         var size: usize = 0;
+
         var ret = openssl.EVP_PKEY_get_group_name(pkey, &ec_str_buf[0], ec_str_buf.len, &size);
+
         if (ret <= 0) {
             log.err("unknown private key curve found inside the pem file");
             return error.UnknownECCurve;
         }
-        var curve = try Type.Curve.from_str(ec_str_buf[0..size]);
+
+        var curve = Type.Curve.from_str(ec_str_buf[0..size]) catch |err| {
+            log.err("unknown private key curve found inside the pem file");
+            return err;
+        };
+
         return Key{ .type = .{ .ECDSA = curve }, .pkey = pkey };
     }
 
@@ -186,37 +206,39 @@ pub const Key = struct {
         var ecsig = openssl.ECDSA_SIG_new();
         defer openssl.ECDSA_SIG_free(ecsig);
 
+
         // What a mess here ....
         var dataPtr: [1][*c]const u8 = [1][*]const u8{sig.ptr};
         var dataPtr2: [*c][*c]const u8 = dataPtr[0..];
         _ = openssl.d2i_ECDSA_SIG(&ecsig, dataPtr2, @intCast(c_long, sig.len)) orelse {
             log.err("failed while decoding the DER-encoded ecdsa signature");
-            return error.d21_ECDSA_SIG_Failed;
+            return error.d21ECDSASIGFailed;
         };
 
         var r = openssl.ECDSA_SIG_get0_r(ecsig) orelse {
             log.err("failed while getting the ecdsa (r) coordinate");
-            return error.ECDSA_SIG_get0_r_Failed;
+            return error.ECDSASIGget0rFailed;
         };
 
         var s = openssl.ECDSA_SIG_get0_s(ecsig) orelse {
             log.err("failed while getting the ecdsa (s) coordinate");
-            return error.ECDSA_SIG_get0_s_Failed;
+            return error.ECDSASIGget0sFailed;
         };
 
         var size = curve.size();
-
         var jwsSig = try allocator.alloc(u8, size * 2);
+        errdefer allocator.free(jwsSig);
+
         var ret = openssl.BN_bn2binpad(r, &jwsSig[0], @intCast(c_int, size));
         if (ret <= 0) {
             log.err("failed while getting the ecdsa coordinate (r) from bignum");
-            return error.BN_bn2binpad_Failed;
+            return error.BNbn2binpadFailed;
         }
 
         ret = openssl.BN_bn2binpad(s, &jwsSig[size], @intCast(c_int, size));
         if (ret <= 0) {
             log.err("failed while getting the ecdsa coordinate (s) from bignum");
-            return error.BN_bn2binpad_Failed;
+            return error.BN_bn2binpadFailed;
         }
 
         return jwsSig;
@@ -224,39 +246,58 @@ pub const Key = struct {
 
     fn sign_evp(key: *openssl.EVP_PKEY, hash: *const openssl.EVP_MD, allocator: std.mem.Allocator, data: []const u8) ![]u8 {
         var md_ctx = openssl.EVP_MD_CTX_create() orelse {
-            log.err("failed while creating the EVP_MD_CTX");
-            return error.EVPDigestSignInitFailed;
+            log.err("failed while creating EVP_MD_CTX");
+            return error.EVPMDCTXCreateFailed;
         };
         defer openssl.EVP_MD_CTX_free(md_ctx);
 
         var evp_pkey: ?*openssl.EVP_PKEY_CTX = null;
         var ret = openssl.EVP_DigestSignInit(md_ctx, &evp_pkey, hash, null, key);
         if (ret <= 0) {
-            log.err("failed while creating the DigestSign");
+            log.err("failed while initializing the digest signer");
             return error.EVPDigestSignInitFailed;
         }
 
         ret = openssl.EVP_DigestSignUpdate(md_ctx, &data[0], data.len);
         if (ret <= 0) {
-            log.err("failed while updating the EVP digest");
+            log.err("failed while updating the signature digest");
             return error.EVPDigestSignUpdateFailed;
         }
 
         var size: usize = 0;
         ret = openssl.EVP_DigestSignFinal(md_ctx, null, &size);
         if (ret <= 0) {
-            log.err("failed while determining the signature size");
+            log.err("failed while determining the final signature size");
             return error.EVPDigestSignFinalFailed;
         }
 
         var sig = try allocator.alloc(u8, size);
+        errdefer allocator.free(sig);
 
         ret = openssl.EVP_DigestSignFinal(md_ctx, &sig[0], &size);
         if (ret <= 0) {
-            log.err("failed while copying the signature");
+            log.err("failed while copying the final signature");
             return error.EVPDigestSignFinalFailed;
         }
 
         return sig;
     }
+
+	fn openssl_print_error(comptime fmt: []const u8, args: anytype) void {
+		var opensslError = false;
+		while (true) {
+			var e = openssl.ERR_get_error();
+			if (e == 0)
+				break;
+
+			opensslError = true;
+			var stderr = std.io.getStdErr().writer();
+			stderr.print("Error: " ++ fmt , args) catch return;
+			stderr.print(": {s}\n" , .{openssl.ERR_error_string(e,null)}) catch return;
+		}
+
+		if (!opensslError) {
+			log.errf(fmt, args);
+		}
+	}
 };
