@@ -373,14 +373,77 @@ test "ecdsa-P521" {
 fn testKey(keyType: Key.Type) !void {
     var key = try Key.generate(keyType);
     defer key.deinit();
+    try std.testing.expectEqual(keyType, key.type);
+
     var keyPem = try key.to_pem(test_allocator);
     defer test_allocator.free(keyPem);
     var keyFromPEM = try Key.from_pem(test_allocator, keyPem);
     defer keyFromPEM.deinit();
+
     try std.testing.expectEqual(keyFromPEM.type, key.type);
 
-    var sign = try key.sign(test_allocator, "sign");
+    const signData = "sign data";
+    var sign = try key.sign(test_allocator, signData);
     defer test_allocator.free(sign);
-    var sign2 = try keyFromPEM.sign(test_allocator, "sign");
+    var sign2 = try keyFromPEM.sign(test_allocator, signData);
     defer test_allocator.free(sign2);
+
+    try testVerifySignature(key, signData, sign);
+    try testVerifySignature(key, signData, sign2);
+    try testVerifySignature(keyFromPEM, signData, sign);
+    try testVerifySignature(keyFromPEM, signData, sign2);
+}
+
+fn testVerifySignature(key: Key, data: []const u8, signature: []const u8) !void {
+    var buf: [1024 * 8]u8 = undefined;
+    var sig = switch (key.type) {
+        .RSA => signature,
+        .ECDSA => blk: {
+            var sigLen = signature.len;
+            if (sigLen % 2 != 0) {
+                return error.SignatureVerifyFailed;
+            }
+            var r = signature[0..(sigLen / 2)];
+            var s = signature[(sigLen / 2)..];
+
+            var sig = openssl.ECDSA_SIG_new();
+            defer openssl.ECDSA_SIG_free(sig);
+            _ = openssl.ECDSA_SIG_set0(sig, openssl.BN_bin2bn(&r[0], @intCast(c_int, r.len), null), openssl.BN_bin2bn(&s[0], @intCast(c_int, s.len), null));
+
+            var len = openssl.i2d_ECDSA_SIG(sig, null);
+            var sign = buf[0..@intCast(usize, len)];
+
+            // What a mess here ....
+            var dataPtr: [1][*c]u8 = [1][*]u8{sign.ptr};
+            var dataPtr2: [*c][*c]u8 = dataPtr[0..];
+            _ = openssl.i2d_ECDSA_SIG(sig, dataPtr2);
+            break :blk sign;
+        },
+    };
+
+    var md_ctx = openssl.EVP_MD_CTX_create() orelse {
+        return error.SignatureVerifyFailed;
+    };
+    defer openssl.EVP_MD_CTX_free(md_ctx);
+
+    var hash = switch (key.type) {
+        .RSA => openssl.EVP_sha256(),
+        .ECDSA => |curve| switch (curve) {
+            .P256 => openssl.EVP_sha256(),
+            .P384 => openssl.EVP_sha384(),
+            .P521 => openssl.EVP_sha512(),
+        },
+    };
+
+    if (openssl.EVP_DigestVerifyInit(md_ctx, null, hash, null, key.pkey) <= 0) {
+        return error.SignatureVerifyFailed;
+    }
+
+    if (openssl.EVP_DigestVerifyUpdate(md_ctx, &data[0], data.len) <= 0) {
+        return error.SignatureVerifyFailed;
+    }
+
+    if (openssl.EVP_DigestVerifyFinal(md_ctx, &sig[0], sig.len) <= 0) {
+        return error.SignatureVerifyFailed;
+    }
 }
