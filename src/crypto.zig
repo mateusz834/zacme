@@ -231,7 +231,7 @@ pub const Key = struct {
         BnBn2BinpadFailure,
     } || std.mem.Allocator.Error;
 
-    pub fn sign(self: *Key, allocator: std.mem.Allocator, data: []const u8) SignError![]u8 {
+    pub fn sign(self: *const Key, allocator: std.mem.Allocator, data: []const u8) SignError![]u8 {
         if (self.pkey == null) {
             @panic("usage of null private key");
         }

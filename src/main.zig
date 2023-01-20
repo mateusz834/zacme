@@ -2,6 +2,7 @@ const std = @import("std");
 const log = @import("./log.zig");
 const http = @import("./http.zig");
 const crypto = @import("./crypto.zig");
+const jws = @import("./jws.zig");
 
 pub fn json_pretty(allocator: std.mem.Allocator, inJson: []const u8) ![]const u8 {
     var parser = std.json.Parser.init(allocator, true);
@@ -63,6 +64,11 @@ pub fn main() !u8 {
     defer allocator.free(signt);
 
     log.stderr.printf("{s}", .{std.fmt.fmtSliceHexLower(signt)});
+
+    var j = try jws.withKID(allocator, key, "b", "c", "bb", "oo");
+    defer allocator.free(j);
+
+    log.stderr.printf("{s}", .{j});
 
     //var md = openssl.EVP_MD_CTX_new() orelse {
     //    log.err("failed while creating EVP_MD_CTX");
