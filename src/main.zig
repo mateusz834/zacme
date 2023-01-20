@@ -50,7 +50,6 @@ pub fn main() !u8 {
 
     log.stdout.print("generating ECDSA P256");
     var ecdsa = try crypto.Key.generate(.{ .ECDSA = .P256 });
-    _ = ecdsa;
 
     var pem = try std.fs.cwd().readFileAlloc(allocator, "./file.pem", 11111111111);
     defer allocator.free(pem);
@@ -77,6 +76,11 @@ pub fn main() !u8 {
     defer allocator.free(j2);
 
     log.stderr.printf("{s}", .{j2});
+
+    var j3 = try jws.withJWK(allocator, ecdsa, "b", "c", "bb");
+    defer allocator.free(j3);
+
+    log.stderr.printf("{s}", .{j3});
 
     //var md = openssl.EVP_MD_CTX_new() orelse {
     //    log.err("failed while creating EVP_MD_CTX");

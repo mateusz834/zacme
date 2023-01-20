@@ -344,7 +344,10 @@ pub const Key = struct {
                     allocator.free(rsa.E);
                     allocator.free(rsa.N);
                 },
-                .ECDSA => unreachable,
+                .ECDSA => |ecdsa| {
+                    allocator.free(ecdsa.X);
+                    allocator.free(ecdsa.Y);
+                },
             }
         }
     };
@@ -352,42 +355,38 @@ pub const Key = struct {
     pub fn GetPublicKey(self: *const Key, allocator: std.mem.Allocator) !PublicKey {
         switch (self.type) {
             .RSA => {
-                var n: ?*openssl.BIGNUM = null;
-                var e: ?*openssl.BIGNUM = null;
-
-                var ret = openssl.EVP_PKEY_get_bn_param(self.pkey, openssl.OSSL_PKEY_PARAM_RSA_N, &n);
-                if (ret <= 0) {
-                    openssl_print_error("failed while retreiving RSA public key details (n)", .{});
-                    return SignError.EvpDigestSignFinalFailure;
-                }
-                defer openssl.BN_free(n);
-
-                ret = openssl.EVP_PKEY_get_bn_param(self.pkey, openssl.OSSL_PKEY_PARAM_RSA_E, &e);
-                if (ret <= 0) {
-                    openssl_print_error("failed while retreiving RSA public key details (e)", .{});
-                    return SignError.EvpDigestSignFinalFailure;
-                }
-                defer openssl.BN_free(e);
-
-                var NBytes = try allocator.alloc(u8, @intCast(usize, openssl.BN_num_bytes(n)));
-                var EBytes = try allocator.alloc(u8, @intCast(usize, openssl.BN_num_bytes(e)));
-
-                ret = openssl.BN_bn2bin(n, &NBytes[0]);
-                if (ret <= 0) {
-                    openssl_print_error("failed while retreiving RSA public key details (n)", .{});
-                    return SignError.EvpDigestSignFinalFailure;
-                }
-
-                ret = openssl.BN_bn2bin(e, &EBytes[0]);
-                if (ret <= 0) {
-                    openssl_print_error("failed while retreiving RSA public key details (e)", .{});
-                    return SignError.EvpDigestSignFinalFailure;
-                }
-
-                return .{ .RSA = .{ .E = EBytes, .N = NBytes } };
+                var e = try evp_pkey_get_bignum_param(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_RSA_E);
+                var n = try evp_pkey_get_bignum_param(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_RSA_N);
+                return .{ .RSA = .{ .E = e, .N = n } };
             },
-            .ECDSA => unreachable,
+            .ECDSA => |curve| {
+                var x = try evp_pkey_get_bignum_param(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_X);
+                var y = try evp_pkey_get_bignum_param(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_Y);
+                return .{ .ECDSA = .{ .Curve = curve, .X = x, .Y = y } };
+            },
         }
+    }
+
+    fn evp_pkey_get_bignum_param(allocator: std.mem.Allocator, pkey: ?*openssl.EVP_PKEY, param: [*c]const u8) ![]const u8 {
+        var bn: ?*openssl.BIGNUM = null;
+
+        var ret = openssl.EVP_PKEY_get_bn_param(pkey, param, &bn);
+        if (ret <= 0) {
+            openssl_print_error("failed while retreiving ECDSA public key x coordinate", .{});
+            return SignError.EvpDigestSignFinalFailure;
+        }
+        defer openssl.BN_free(bn);
+
+        var bytes = try allocator.alloc(u8, @intCast(usize, openssl.BN_num_bytes(bn)));
+        errdefer allocator.free(bytes);
+
+        ret = openssl.BN_bn2bin(bn, &bytes[0]);
+        if (ret <= 0) {
+            openssl_print_error("failed while retreiving RSA public key details (e)", .{});
+            return SignError.EvpDigestSignFinalFailure;
+        }
+
+        return bytes;
     }
 
     fn openssl_print_error(comptime fmt: []const u8, args: anytype) void {

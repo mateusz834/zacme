@@ -12,6 +12,14 @@ fn jwsAlgName(key: crypto.Key) []const u8 {
     };
 }
 
+fn jwkCurveName(curve: crypto.Key.Type.Curve) []const u8 {
+    return switch (curve) {
+        .P256 => "P-256",
+        .P384 => "P-384",
+        .P521 => "P-521",
+    };
+}
+
 const jwk = union(enum) {
     RSA: struct { E: []const u8, N: []const u8 },
     ECDSA: struct { Curve: []const u8, X: []const u8, Y: []const u8 },
@@ -33,7 +41,19 @@ const jwk = union(enum) {
                     .n = val.N,
                 }, options, out_stream);
             },
-            .ECDSA => unreachable,
+            .ECDSA => |val| {
+                const ecdsa = struct {
+                    crv: []const u8,
+                    kty: []const u8 = "EC",
+                    x: []const u8,
+                    y: []const u8,
+                };
+                return std.json.stringify(ecdsa{
+                    .crv = val.Curve,
+                    .x = val.X,
+                    .y = val.Y,
+                }, options, out_stream);
+            },
         }
     }
 };
@@ -67,23 +87,32 @@ pub fn withJWK(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, 
 
     switch (public) {
         .RSA => |rsa| {
-            var e = try allocator.alloc(u8, base64Encoder.calcSize(rsa.E.len));
+            var e = try encodeBase64(allocator, rsa.E);
             defer allocator.free(e);
-
-            var n = try allocator.alloc(u8, base64Encoder.calcSize(rsa.N.len));
+            var n = try encodeBase64(allocator, rsa.N);
             defer allocator.free(n);
-
-            _ = base64Encoder.encode(e, rsa.E);
-            _ = base64Encoder.encode(n, rsa.N);
 
             hdrs.jwk = .{ .RSA = .{ .E = e, .N = n } };
             return jws(allocator, key, payload, hdrs);
         },
-        .ECDSA => unreachable,
+        .ECDSA => |ecdsa| {
+            var x = try encodeBase64(allocator, ecdsa.X);
+            defer allocator.free(x);
+            var y = try encodeBase64(allocator, ecdsa.Y);
+            defer allocator.free(y);
+
+            hdrs.jwk = .{ .ECDSA = .{ .Curve = jwkCurveName(ecdsa.Curve), .X = x, .Y = y } };
+            return jws(allocator, key, payload, hdrs);
+        },
     }
 }
 
 const base64Encoder = std.base64.url_safe_no_pad.Encoder;
+
+fn encodeBase64(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
+    var buf = try allocator.alloc(u8, base64Encoder.calcSize(data.len));
+    return base64Encoder.encode(buf, data);
+}
 
 fn jws(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, hdrs: headers) ![]const u8 {
     var jsonHeaders = try std.json.stringifyAlloc(allocator, hdrs, .{ .emit_null_optional_fields = false });
@@ -107,8 +136,6 @@ fn jws(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, hdrs: he
     var signatureBase64 = try allocator.alloc(u8, base64Encoder.calcSize(sign.len));
     defer allocator.free(signatureBase64);
 
-    _ = base64Encoder.encode(signatureBase64, sign);
-
     const jwsWebSignature = struct {
         protected: []const u8,
         payload: []const u8,
@@ -118,6 +145,6 @@ fn jws(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, hdrs: he
     return try std.json.stringifyAlloc(allocator, jwsWebSignature{
         .protected = headersBase64,
         .payload = payloadBase64,
-        .signature = signatureBase64,
+        .signature = base64Encoder.encode(signatureBase64, sign),
     }, .{});
 }
