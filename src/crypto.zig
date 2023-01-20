@@ -78,7 +78,7 @@ pub const Key = struct {
         };
     };
 
-    pub fn deinit(self: *Key) !Key {
+    pub fn deinit(self: *Key) void {
         openssl.EVP_PKEY_free(self.pkey.?);
     }
 
@@ -155,7 +155,7 @@ pub const Key = struct {
     }
 
     fn from_pem_ecdsa(pkey: *openssl.EVP_PKEY, allocator: std.mem.Allocator) PEMParseError!Key {
-        var ec_str_buf: [Type.Curve.max_str_size:0]u8 = undefined;
+        var ec_str_buf: [Type.Curve.max_str_size + 1]u8 = undefined;
         var size: usize = 0;
 
         // EVP_PKEY_get_group_name() returns 1 if the group name could be filled in, otherwise 0.
@@ -351,3 +351,36 @@ pub const Key = struct {
         }
     }
 };
+
+const test_allocator = std.testing.allocator;
+
+test "rsa-2048" {
+    try testKey(.{ .RSA = 2048 });
+}
+
+test "ecdsa-P256" {
+    _ = try testKey(.{ .ECDSA = .P256 });
+}
+
+test "ecdsa-P384" {
+    _ = try testKey(.{ .ECDSA = .P384 });
+}
+
+test "ecdsa-P521" {
+    _ = try testKey(.{ .ECDSA = .P521 });
+}
+
+fn testKey(keyType: Key.Type) !void {
+    var key = try Key.generate(keyType);
+    defer key.deinit();
+    var keyPem = try key.to_pem(test_allocator);
+    defer test_allocator.free(keyPem);
+    var keyFromPEM = try Key.from_pem(test_allocator, keyPem);
+    defer keyFromPEM.deinit();
+    try std.testing.expectEqual(keyFromPEM.type, key.type);
+
+    var sign = try key.sign(test_allocator, "sign");
+    defer test_allocator.free(sign);
+    var sign2 = try keyFromPEM.sign(test_allocator, "sign");
+    defer test_allocator.free(sign2);
+}

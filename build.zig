@@ -14,14 +14,14 @@ pub fn build(b: *std.build.Builder) void {
     const exe = b.addExecutable("zacme", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
-	exe.linkLibC();
+    exe.linkLibC();
 
-	exe.addSystemIncludePath("/usr/include");
-	exe.linkSystemLibrary("libcrypto");
-	exe.linkSystemLibrary("libcurl");
+    exe.addSystemIncludePath("/usr/include");
+    exe.linkSystemLibrary("libcrypto");
+    exe.linkSystemLibrary("libcurl");
 
-	exe.addCSourceFile("./src/openssl.c", &[_][]const u8 {});
-	exe.addIncludePath("./src");
+    exe.addCSourceFile("./src/openssl.c", &[_][]const u8{});
+    exe.addIncludePath("./src");
 
     exe.install();
 
@@ -35,9 +35,14 @@ pub fn build(b: *std.build.Builder) void {
     run_step.dependOn(&run_cmd.step);
 
     const exe_tests = b.addTest("src/main.zig");
+    exe_tests.linkLibC();
+    exe_tests.addSystemIncludePath("/usr/include");
+    exe_tests.linkSystemLibrary("libcrypto");
+    exe_tests.linkSystemLibrary("libcurl");
+    exe_tests.addCSourceFile("./src/openssl.c", &[_][]const u8{});
+    exe_tests.addIncludePath("./src");
     exe_tests.setTarget(target);
     exe_tests.setBuildMode(mode);
-
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&exe_tests.step);
 }

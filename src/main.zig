@@ -154,3 +154,7 @@ pub fn sendRequest() !void {
     std.log.info("Got response of {d} bytes", .{response_buffer.items.len});
     std.debug.print("{s}\n", .{response_buffer.items});
 }
+
+test {
+    _ = crypto;
+}
