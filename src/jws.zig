@@ -29,6 +29,14 @@ pub fn withKID(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, 
     });
 }
 
+pub fn withJWK(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, nonce: []const u8, url: []const u8) ![]const u8 {
+    return jws(allocator, key, payload, headers{
+        .alg = jwsAlgName(key),
+        .nonce = nonce,
+        .url = url,
+    });
+}
+
 const base64Encoder = std.base64.url_safe_no_pad.Encoder;
 
 fn jws(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, hdrs: headers) ![]const u8 {

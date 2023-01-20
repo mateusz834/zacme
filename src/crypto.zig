@@ -6,6 +6,7 @@ const openssl = @cImport({
     @cInclude("openssl/bio.h");
     @cInclude("openssl/err.h");
     @cInclude("openssl/objects.h");
+    @cInclude("openssl/core_names.h");
     @cInclude("openssl.h");
 });
 
@@ -331,6 +332,62 @@ pub const Key = struct {
         }
 
         return sig;
+    }
+
+    pub const PublicKey = union(enum) {
+        RSA: struct { E: []const u8, N: []const u8 },
+        ECDSA: struct { Curve: Type.Curve, X: []const u8, Y: []const u8 },
+
+        pub fn deinit(self: *PublicKey, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .RSA => |rsa| {
+                    allocator.free(rsa.E);
+                    allocator.free(rsa.N);
+                },
+                .ECDSA => unreachable,
+            }
+        }
+    };
+
+    pub fn GetPublicKey(self: *const Key, allocator: std.mem.Allocator) !PublicKey {
+        switch (self.type) {
+            .RSA => {
+                var n: ?*openssl.BIGNUM = null;
+                var e: ?*openssl.BIGNUM = null;
+
+                var ret = openssl.EVP_PKEY_get_bn_param(self.pkey, openssl.OSSL_PKEY_PARAM_RSA_N, &n);
+                if (ret <= 0) {
+                    openssl_print_error("failed while retreiving RSA public key details (n)", .{});
+                    return SignError.EvpDigestSignFinalFailure;
+                }
+                defer openssl.BN_free(n);
+
+                ret = openssl.EVP_PKEY_get_bn_param(self.pkey, openssl.OSSL_PKEY_PARAM_RSA_E, &e);
+                if (ret <= 0) {
+                    openssl_print_error("failed while retreiving RSA public key details (e)", .{});
+                    return SignError.EvpDigestSignFinalFailure;
+                }
+                defer openssl.BN_free(e);
+
+                var NBytes = try allocator.alloc(u8, @intCast(usize, openssl.BN_num_bytes(n)));
+                var EBytes = try allocator.alloc(u8, @intCast(usize, openssl.BN_num_bytes(e)));
+
+                ret = openssl.BN_bn2bin(n, &NBytes[0]);
+                if (ret <= 0) {
+                    openssl_print_error("failed while retreiving RSA public key details (n)", .{});
+                    return SignError.EvpDigestSignFinalFailure;
+                }
+
+                ret = openssl.BN_bn2bin(e, &EBytes[0]);
+                if (ret <= 0) {
+                    openssl_print_error("failed while retreiving RSA public key details (e)", .{});
+                    return SignError.EvpDigestSignFinalFailure;
+                }
+
+                return .{ .RSA = .{ .E = EBytes, .N = NBytes } };
+            },
+            .ECDSA => unreachable,
+        }
     }
 
     fn openssl_print_error(comptime fmt: []const u8, args: anytype) void {

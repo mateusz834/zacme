@@ -38,7 +38,10 @@ pub fn main() !u8 {
 
     log.stdout.print("generating RSA-2048");
     var rsa = try crypto.Key.generate(.{ .RSA = 2048 });
-    _ = rsa;
+
+    var public = try rsa.GetPublicKey(allocator);
+    defer public.deinit(allocator);
+    log.stderr.printf("{}", .{public});
 
     //var sign = try rsa.sign(allocator, "siema");
     //defer allocator.free(sign);
