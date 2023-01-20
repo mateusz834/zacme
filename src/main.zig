@@ -51,7 +51,7 @@ pub fn main() !u8 {
     var pem = try std.fs.cwd().readFileAlloc(allocator, "./file.pem", 11111111111);
     defer allocator.free(pem);
 
-    var key = try crypto.Key.from_pem(pem);
+    var key = try crypto.Key.from_pem(allocator, pem);
     log.stderr.printf("key type: {}", .{key.type});
 
     var pem2 = try key.to_pem(allocator);
