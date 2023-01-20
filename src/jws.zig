@@ -86,7 +86,7 @@ pub fn withJWK(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, 
 const base64Encoder = std.base64.url_safe_no_pad.Encoder;
 
 fn jws(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, hdrs: headers) ![]const u8 {
-    var jsonHeaders = try std.json.stringifyAlloc(allocator, hdrs, .{});
+    var jsonHeaders = try std.json.stringifyAlloc(allocator, hdrs, .{ .emit_null_optional_fields = false });
     defer allocator.free(jsonHeaders);
 
     var jsonPayload = try std.json.stringifyAlloc(allocator, payload, .{});
