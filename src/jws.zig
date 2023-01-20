@@ -12,11 +12,37 @@ fn jwsAlgName(key: crypto.Key) []const u8 {
     };
 }
 
+const jwk = union(enum) {
+    RSA: struct { E: []const u8, N: []const u8 },
+    ECDSA: struct { Curve: []const u8, X: []const u8, Y: []const u8 },
+
+    pub fn jsonStringify(
+        self: jwk,
+        options: std.json.StringifyOptions,
+        out_stream: anytype,
+    ) @TypeOf(out_stream).Error!void {
+        switch (self) {
+            .RSA => |val| {
+                const rsa = struct {
+                    e: []const u8,
+                    kty: []const u8 = "RSA",
+                    n: []const u8,
+                };
+                return std.json.stringify(rsa{
+                    .e = val.E,
+                    .n = val.N,
+                }, options, out_stream);
+            },
+            .ECDSA => unreachable,
+        }
+    }
+};
+
 const headers = struct {
     alg: []const u8,
     nonce: []const u8,
     url: []const u8,
-    jwk: ?[]const u8 = null,
+    jwk: ?jwk = null,
     kid: ?[]const u8 = null,
 };
 
@@ -30,11 +56,31 @@ pub fn withKID(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, 
 }
 
 pub fn withJWK(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, nonce: []const u8, url: []const u8) ![]const u8 {
-    return jws(allocator, key, payload, headers{
+    var hdrs = headers{
         .alg = jwsAlgName(key),
         .nonce = nonce,
         .url = url,
-    });
+    };
+
+    var public = try key.GetPublicKey(allocator);
+    defer public.deinit(allocator);
+
+    switch (public) {
+        .RSA => |rsa| {
+            var e = try allocator.alloc(u8, base64Encoder.calcSize(rsa.E.len));
+            defer allocator.free(e);
+
+            var n = try allocator.alloc(u8, base64Encoder.calcSize(rsa.N.len));
+            defer allocator.free(n);
+
+            _ = base64Encoder.encode(e, rsa.E);
+            _ = base64Encoder.encode(n, rsa.N);
+
+            hdrs.jwk = .{ .RSA = .{ .E = e, .N = n } };
+            return jws(allocator, key, payload, hdrs);
+        },
+        .ECDSA => unreachable,
+    }
 }
 
 const base64Encoder = std.base64.url_safe_no_pad.Encoder;

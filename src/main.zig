@@ -68,10 +68,15 @@ pub fn main() !u8 {
 
     log.stderr.printf("{s}", .{std.fmt.fmtSliceHexLower(signt)});
 
-    var j = try jws.withKID(allocator, key, "b", "c", "bb", "oo");
+    var j = try jws.withKID(allocator, rsa, "b", "c", "bb", "oo");
     defer allocator.free(j);
 
     log.stderr.printf("{s}", .{j});
+
+    var j2 = try jws.withJWK(allocator, rsa, "b", "c", "bb");
+    defer allocator.free(j2);
+
+    log.stderr.printf("{s}", .{j2});
 
     //var md = openssl.EVP_MD_CTX_new() orelse {
     //    log.err("failed while creating EVP_MD_CTX");
