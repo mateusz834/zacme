@@ -352,19 +352,44 @@ pub const Key = struct {
         }
     };
 
-    pub fn GetPublicKey(self: *const Key, allocator: std.mem.Allocator) !PublicKey {
+    pub fn getPublicKey(self: *const Key, allocator: std.mem.Allocator) !PublicKey {
         switch (self.type) {
             .RSA => {
                 var e = try evp_pkey_get_bignum_param(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_RSA_E);
+                errdefer allocator.free(e);
                 var n = try evp_pkey_get_bignum_param(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_RSA_N);
                 return .{ .RSA = .{ .E = e, .N = n } };
             },
             .ECDSA => |curve| {
-                var x = try evp_pkey_get_bignum_param(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_X);
-                var y = try evp_pkey_get_bignum_param(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_Y);
+                var size = curve.size();
+                var x = try evp_pkey_get_bignum_param_padded(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_X, size);
+                errdefer allocator.free(x);
+                var y = try evp_pkey_get_bignum_param_padded(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_Y, size);
                 return .{ .ECDSA = .{ .Curve = curve, .X = x, .Y = y } };
             },
         }
+    }
+
+    fn evp_pkey_get_bignum_param_padded(allocator: std.mem.Allocator, pkey: ?*openssl.EVP_PKEY, param: [*c]const u8, size: usize) ![]const u8 {
+        var bn: ?*openssl.BIGNUM = null;
+
+        var ret = openssl.EVP_PKEY_get_bn_param(pkey, param, &bn);
+        if (ret <= 0) {
+            openssl_print_error("failed while retreiving the bignum parameter from key", .{});
+            return error.EvpPkeyGetBnParamFailure;
+        }
+        defer openssl.BN_free(bn);
+
+        var bytes = try allocator.alloc(u8, size);
+        errdefer allocator.free(bytes);
+
+        ret = openssl.BN_bn2binpad(bn, &bytes[0], @intCast(c_int, bytes.len));
+        if (ret <= 0) {
+            openssl_print_error("failed while retreiving the bignum parameter from key", .{});
+            return error.Bn2BinPadFailure;
+        }
+
+        return bytes;
     }
 
     fn evp_pkey_get_bignum_param(allocator: std.mem.Allocator, pkey: ?*openssl.EVP_PKEY, param: [*c]const u8) ![]const u8 {
@@ -372,8 +397,8 @@ pub const Key = struct {
 
         var ret = openssl.EVP_PKEY_get_bn_param(pkey, param, &bn);
         if (ret <= 0) {
-            openssl_print_error("failed while retreiving ECDSA public key x coordinate", .{});
-            return SignError.EvpDigestSignFinalFailure;
+            openssl_print_error("failed while retreiving the bignum parameter from key", .{});
+            return error.EvpPkeyGetBnParamFailure;
         }
         defer openssl.BN_free(bn);
 
@@ -382,8 +407,8 @@ pub const Key = struct {
 
         ret = openssl.BN_bn2bin(bn, &bytes[0]);
         if (ret <= 0) {
-            openssl_print_error("failed while retreiving RSA public key details (e)", .{});
-            return SignError.EvpDigestSignFinalFailure;
+            openssl_print_error("failed while retreiving the bignum parameter from key", .{});
+            return error.Bn2BinFailure;
         }
 
         return bytes;
@@ -437,6 +462,12 @@ fn testKey(keyType: Key.Type) !void {
     defer keyFromPEM.deinit();
 
     try std.testing.expectEqual(keyFromPEM.type, key.type);
+
+    var pub_key = try key.getPublicKey(test_allocator);
+    defer pub_key.deinit(test_allocator);
+
+    var pub2_key = try keyFromPEM.getPublicKey(test_allocator);
+    defer pub2_key.deinit(test_allocator);
 
     const signData = "sign data";
     var sign = try key.sign(test_allocator, signData);

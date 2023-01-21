@@ -82,7 +82,7 @@ pub fn withJWK(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, 
         .url = url,
     };
 
-    var public = try key.GetPublicKey(allocator);
+    var public = try key.getPublicKey(allocator);
     defer public.deinit(allocator);
 
     switch (public) {
