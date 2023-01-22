@@ -413,25 +413,25 @@ pub const Key = struct {
 
         return bytes;
     }
-
-    fn openssl_print_error(comptime fmt: []const u8, args: anytype) void {
-        var opensslError = false;
-        while (true) {
-            var e = openssl.ERR_get_error();
-            if (e == 0)
-                break;
-
-            opensslError = true;
-            var stderr = std.io.getStdErr().writer();
-            stderr.print("Error: " ++ fmt, args) catch return;
-            stderr.print(": {s}\n", .{openssl.ERR_error_string(e, null)}) catch return;
-        }
-
-        if (!opensslError) {
-            log.errf(fmt, args);
-        }
-    }
 };
+
+fn openssl_print_error(comptime fmt: []const u8, args: anytype) void {
+    var opensslError = false;
+    while (true) {
+        var e = openssl.ERR_get_error();
+        if (e == 0)
+            break;
+
+        opensslError = true;
+        var stderr = std.io.getStdErr().writer();
+        stderr.print("Error: " ++ fmt, args) catch return;
+        stderr.print(": {s}\n", .{openssl.ERR_error_string(e, null)}) catch return;
+    }
+
+    if (!opensslError) {
+        log.errf(fmt, args);
+    }
+}
 
 const test_allocator = std.testing.allocator;
 
@@ -440,15 +440,15 @@ test "rsa-2048" {
 }
 
 test "ecdsa-P256" {
-    _ = try testKey(.{ .ECDSA = .P256 });
+    try testKey(.{ .ECDSA = .P256 });
 }
 
 test "ecdsa-P384" {
-    _ = try testKey(.{ .ECDSA = .P384 });
+    try testKey(.{ .ECDSA = .P384 });
 }
 
 test "ecdsa-P521" {
-    _ = try testKey(.{ .ECDSA = .P521 });
+    try testKey(.{ .ECDSA = .P521 });
 }
 
 fn testKey(keyType: Key.Type) !void {
@@ -463,12 +463,6 @@ fn testKey(keyType: Key.Type) !void {
 
     try std.testing.expectEqual(keyFromPEM.type, key.type);
 
-    var pub_key = try key.getPublicKey(test_allocator);
-    defer pub_key.deinit(test_allocator);
-
-    var pub2_key = try keyFromPEM.getPublicKey(test_allocator);
-    defer pub2_key.deinit(test_allocator);
-
     const signData = "sign data";
     var sign = try key.sign(test_allocator, signData);
     defer test_allocator.free(sign);
@@ -479,10 +473,117 @@ fn testKey(keyType: Key.Type) !void {
     try testVerifySignature(key, signData, sign2);
     try testVerifySignature(keyFromPEM, signData, sign);
     try testVerifySignature(keyFromPEM, signData, sign2);
+
+    var pub_key = try key.getPublicKey(test_allocator);
+    defer pub_key.deinit(test_allocator);
+
+    var pub2_key = try keyFromPEM.getPublicKey(test_allocator);
+    defer pub2_key.deinit(test_allocator);
+
+    try verifySignatureFromPublicKey(pub_key, signData, sign);
+    try verifySignatureFromPublicKey(pub_key, signData, sign2);
+    try verifySignatureFromPublicKey(pub2_key, signData, sign);
+    try verifySignatureFromPublicKey(pub2_key, signData, sign2);
+}
+
+fn verifySignatureFromPublicKey(public: Key.PublicKey, data: []const u8, sig: []const u8) !void {
+    //const OSSL_PARAM_END = blk: {
+    //	var tmp: openssl.OSSL_PARAM = undefined;
+    //	tmp.key = null;
+    //	break :blk tmp;
+    //};
+
+    switch (public) {
+        .RSA => |rsa| {
+            var bn_e = openssl.BN_bin2bn(&rsa.E[0], @intCast(c_int, rsa.E.len), null) orelse return error.Failed;
+            defer openssl.BN_free(bn_e);
+            var bn_n = openssl.BN_bin2bn(&rsa.N[0], @intCast(c_int, rsa.N.len), null) orelse return error.Failed;
+            defer openssl.BN_free(bn_n);
+
+            var rsa_key = openssl.RSA_new();
+            if (openssl.RSA_set0_key(rsa_key, bn_n, bn_e, null) <= 0)
+                return error.SignatureVerifyFailed;
+
+            var pkey = openssl.EVP_PKEY_new() orelse return error.Failed;
+            defer openssl.EVP_PKEY_free(pkey);
+
+            if (openssl.EVP_PKEY_set1_RSA(pkey, rsa_key) <= 0)
+                return error.Failed;
+
+            try testVerifySignature(Key{ .type = .{ .RSA = 0 }, .pkey = pkey }, data, sig);
+
+            //TODO: figure a way to do this without using a deprecated API.
+            //TODO: this below does not work.
+
+            //var ctx = openssl.EVP_PKEY_CTX_new_from_name(null, "RSA", null) orelse return error.Failed;
+            //defer openssl.EVP_PKEY_CTX_free(ctx);
+            //var params =  [_]openssl.OSSL_PARAM{
+            //	.{
+            //		.key = openssl.OSSL_PKEY_PARAM_RSA_E,
+            //		.data_type = openssl.OSSL_PARAM_UNSIGNED_INTEGER,
+            //		.data = bn_e,
+            //		.data_size = @intCast(usize, openssl.BN_num_bytes(bn_e)),
+            //		.return_size = openssl.OSSL_PARAM_UNMODIFIED
+            //	},
+            //	.{
+            //		.key = openssl.OSSL_PKEY_PARAM_RSA_N,
+            //		.data_type = openssl.OSSL_PARAM_UNSIGNED_INTEGER,
+            //		.data = bn_n,
+            //		.data_size = @intCast(usize, openssl.BN_num_bytes(bn_n)),
+            //		.return_size = openssl.OSSL_PARAM_UNMODIFIED
+            //	},
+            //	.{
+            //		.key = openssl.OSSL_PKEY_PARAM_RSA_D,
+            //		.data_type = openssl.OSSL_PARAM_UNSIGNED_INTEGER,
+            //		.data = null,
+            //		.data_size = 0,
+            //		.return_size = openssl.OSSL_PARAM_UNMODIFIED
+            //	},
+            //	OSSL_PARAM_END
+            //};
+
+            //if (openssl.EVP_PKEY_fromdata_init(ctx) <= 0)
+            //	return error.Failed;
+            //if (openssl.EVP_PKEY_fromdata(ctx, &pkey, openssl.EVP_PKEY_PUBLIC_KEY, &params[0]) <= 0)
+            //	return error.Failed;
+        },
+        .ECDSA => |ecdsa| {
+            var bn_x = openssl.BN_bin2bn(&ecdsa.X[0], @intCast(c_int, ecdsa.X.len), null) orelse return error.Failed;
+            defer openssl.BN_free(bn_x);
+            var bn_y = openssl.BN_bin2bn(&ecdsa.Y[0], @intCast(c_int, ecdsa.Y.len), null) orelse return error.Failed;
+            defer openssl.BN_free(bn_y);
+
+            var nid = switch (ecdsa.Curve) {
+                .P256 => openssl.NID_X9_62_prime256v1,
+                .P384 => openssl.NID_secp384r1,
+                .P521 => openssl.NID_secp521r1,
+            };
+
+            var ec_key = openssl.EC_KEY_new_by_curve_name(nid) orelse return error.Failed;
+            var group = openssl.EC_GROUP_new_by_curve_name(nid) orelse return error.Failed;
+            var point = openssl.EC_POINT_new(group) orelse return error.Failed;
+            var bn_ctx = openssl.BN_CTX_new() orelse return error.Failed;
+            defer openssl.BN_CTX_free(bn_ctx);
+
+            if (openssl.EC_POINT_set_affine_coordinates(group, point, bn_x, bn_y, bn_ctx) <= 0)
+                return error.Failed;
+
+            if (openssl.EC_KEY_set_public_key(ec_key, point) <= 0)
+                return error.Failed;
+
+            var pkey = openssl.EVP_PKEY_new() orelse return error.Failed;
+            defer openssl.EVP_PKEY_free(pkey);
+
+            if (openssl.EVP_PKEY_set1_EC_KEY(pkey, ec_key) <= 0)
+                return error.Failed;
+
+            try testVerifySignature(Key{ .type = .{ .ECDSA = ecdsa.Curve }, .pkey = pkey }, data, sig);
+        },
+    }
 }
 
 fn testVerifySignature(key: Key, data: []const u8, signature: []const u8) !void {
-    var buf: [1024 * 8]u8 = undefined;
+    var buf: [1024]u8 = undefined;
     var sig = switch (key.type) {
         .RSA => signature,
         .ECDSA => blk: {
@@ -508,9 +609,7 @@ fn testVerifySignature(key: Key, data: []const u8, signature: []const u8) !void 
         },
     };
 
-    var md_ctx = openssl.EVP_MD_CTX_create() orelse {
-        return error.SignatureVerifyFailed;
-    };
+    var md_ctx = openssl.EVP_MD_CTX_create() orelse return error.SignatureVerifyFailed;
     defer openssl.EVP_MD_CTX_free(md_ctx);
 
     var hash = switch (key.type) {
@@ -522,15 +621,10 @@ fn testVerifySignature(key: Key, data: []const u8, signature: []const u8) !void 
         },
     };
 
-    if (openssl.EVP_DigestVerifyInit(md_ctx, null, hash, null, key.pkey) <= 0) {
+    if (openssl.EVP_DigestVerifyInit(md_ctx, null, hash, null, key.pkey) <= 0)
         return error.SignatureVerifyFailed;
-    }
-
-    if (openssl.EVP_DigestVerifyUpdate(md_ctx, &data[0], data.len) <= 0) {
+    if (openssl.EVP_DigestVerifyUpdate(md_ctx, &data[0], data.len) <= 0)
         return error.SignatureVerifyFailed;
-    }
-
-    if (openssl.EVP_DigestVerifyFinal(md_ctx, &sig[0], sig.len) <= 0) {
+    if (openssl.EVP_DigestVerifyFinal(md_ctx, &sig[0], sig.len) <= 0)
         return error.SignatureVerifyFailed;
-    }
 }

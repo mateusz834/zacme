@@ -44,7 +44,7 @@ pub fn main() !u8 {
     log.stderr.printf("{}", .{public});
 
     //var sign = try rsa.sign(allocator, "siema");
-    //defer allocator.free(sign);
+    //defer allocator.fre(sign);
 
     //log.stdout.printf("signature: {x}", .{std.fmt.fmtSliceHexLower(sign)});
 
