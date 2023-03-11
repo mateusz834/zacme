@@ -562,10 +562,8 @@ fn verifySignatureFromPublicKey(public: Key.PublicKey, data: []const u8, sig: []
             var ec_key = openssl.EC_KEY_new_by_curve_name(nid) orelse return error.Failed;
             var group = openssl.EC_GROUP_new_by_curve_name(nid) orelse return error.Failed;
             var point = openssl.EC_POINT_new(group) orelse return error.Failed;
-            var bn_ctx = openssl.BN_CTX_new() orelse return error.Failed;
-            defer openssl.BN_CTX_free(bn_ctx);
 
-            if (openssl.EC_POINT_set_affine_coordinates(group, point, bn_x, bn_y, bn_ctx) <= 0)
+            if (openssl.EC_POINT_set_affine_coordinates(group, point, bn_x, bn_y, null) <= 0)
                 return error.Failed;
 
             if (openssl.EC_KEY_set_public_key(ec_key, point) <= 0)

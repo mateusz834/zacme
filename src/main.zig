@@ -33,54 +33,54 @@ pub fn main() !u8 {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    //var out = try http.send_query(allocator);
-    //defer allocator.free(out);
+    var out = try http.query(allocator, .{ .url = "http://google.com", .method = .POST, .body = .{ .content = "siema", .type = .JSON } });
+    defer out.deinit(allocator);
 
-    log.stdout.print("generating RSA-2048");
-    var rsa = try crypto.Key.generate(.{ .RSA = 2048 });
+    //log.stdout.print("generating RSA-2048");
+    //var rsa = try crypto.Key.generate(.{ .RSA = 2048 });
 
-    var public = try rsa.getPublicKey(allocator);
-    defer public.deinit(allocator);
-    log.stderr.printf("{}", .{public});
+    //var public = try rsa.getPublicKey(allocator);
+    //defer public.deinit(allocator);
+    //log.stderr.printf("{}", .{public});
 
-    //var sign = try rsa.sign(allocator, "siema");
-    //defer allocator.fre(sign);
+    ////var sign = try rsa.sign(allocator, "siema");
+    ////defer allocator.fre(sign);
 
-    //log.stdout.printf("signature: {x}", .{std.fmt.fmtSliceHexLower(sign)});
+    ////log.stdout.printf("signature: {x}", .{std.fmt.fmtSliceHexLower(sign)});
 
-    log.stdout.print("generating ECDSA P256");
-    var ecdsa = try crypto.Key.generate(.{ .ECDSA = .P256 });
+    //log.stdout.print("generating ECDSA P256");
+    //var ecdsa = try crypto.Key.generate(.{ .ECDSA = .P256 });
 
-    var pem = try std.fs.cwd().readFileAlloc(allocator, "./file.pem", 11111111111);
-    defer allocator.free(pem);
+    //var pem = try std.fs.cwd().readFileAlloc(allocator, "./file.pem", 11111111111);
+    //defer allocator.free(pem);
 
-    var key = try crypto.Key.from_pem(allocator, pem);
-    log.stderr.printf("key type: {}", .{key.type});
+    //var key = try crypto.Key.from_pem(allocator, pem);
+    //log.stderr.printf("key type: {}", .{key.type});
 
-    var pem2 = try key.to_pem(allocator);
-    defer allocator.free(pem2);
+    //var pem2 = try key.to_pem(allocator);
+    //defer allocator.free(pem2);
 
-    log.stderr.printf("{s}", .{pem2});
+    //log.stderr.printf("{s}", .{pem2});
 
-    var signt = try key.sign(allocator, "siema");
-    defer allocator.free(signt);
+    //var signt = try key.sign(allocator, "siema");
+    //defer allocator.free(signt);
 
-    log.stderr.printf("{s}", .{std.fmt.fmtSliceHexLower(signt)});
+    //log.stderr.printf("{s}", .{std.fmt.fmtSliceHexLower(signt)});
 
-    var j = try jws.withKID(allocator, rsa, "b", "c", "bb", "oo");
-    defer allocator.free(j);
+    //var j = try jws.withKID(allocator, rsa, "b", "c", "bb", "oo");
+    //defer allocator.free(j);
 
-    log.stderr.printf("{s}", .{j});
+    //log.stderr.printf("{s}", .{j});
 
-    var j2 = try jws.withJWK(allocator, rsa, "b", "c", "bb");
-    defer allocator.free(j2);
+    //var j2 = try jws.withJWK(allocator, rsa, "b", "c", "bb");
+    //defer allocator.free(j2);
 
-    log.stderr.printf("{s}", .{j2});
+    //log.stderr.printf("{s}", .{j2});
 
-    var j3 = try jws.withJWK(allocator, ecdsa, "b", "c", "bb");
-    defer allocator.free(j3);
+    //var j3 = try jws.withJWK(allocator, ecdsa, "b", "c", "bb");
+    //defer allocator.free(j3);
 
-    log.stderr.printf("{s}", .{j3});
+    //log.stderr.printf("{s}", .{j3});
 
     //var md = openssl.EVP_MD_CTX_new() orelse {
     //    log.err("failed while creating EVP_MD_CTX");

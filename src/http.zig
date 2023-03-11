@@ -16,6 +16,14 @@ pub fn deinit() void {
     }
 }
 
+fn setOpt(option: curl.CURLoption, value: anytype) !void {
+    var ret = curl.curl_easy_setopt(handle, option, value);
+    if (ret != curl.CURLE_OK) {
+        log.errf("failed to set libcurl option: {s}", .{curl.curl_easy_strerror(ret)});
+        return error.CURLFailedSetOpt;
+    }
+}
+
 fn init() !void {
     if (handle != null)
         return;
@@ -31,60 +39,106 @@ fn init() !void {
         log.err("failed to create libcurl handle");
         return error.CURLFailedHandleInit;
     };
+    errdefer curl.curl_easy_cleanup(handle);
 
-    if (verbose) {
-        ret = curl.curl_easy_setopt(handle, curl.CURLOPT_VERBOSE, @intCast(c_long, 1));
-        if (ret != curl.CURLE_OK) {
-            log.errf("failed to set libcurl debug: {s}", .{curl.curl_easy_strerror(ret)});
-            return error.CURLFailedSetURL;
-        }
-    }
+    if (verbose)
+        try setOpt(curl.CURLOPT_VERBOSE, @intCast(c_long, 1));
 
-    ret = curl.curl_easy_setopt(handle, curl.CURLOPT_SSLVERSION, curl.CURL_SSLVERSION_TLSv1_2);
-    if (ret != curl.CURLE_OK) {
-        log.errf("failed to set libcurl min TLS verison: {s}", .{curl.curl_easy_strerror(ret)});
-        return error.CURLFailedSetURL;
-    }
-
-    ret = curl.curl_easy_setopt(handle, curl.CURLOPT_WRITEFUNCTION, writeCallback);
-    if (ret != curl.CURLE_OK) {
-        log.errf("failed to set libcurl write function: {s}", .{curl.curl_easy_strerror(ret)});
-        return error.CURLFailedSetURL;
-    }
-
-    ret = curl.curl_easy_setopt(handle, curl.CURLOPT_ERRORBUFFER, &errBuf[0]);
-    if (ret != curl.CURLE_OK) {
-        log.errf("failed to set libcurl protocols: {s}", .{curl.curl_easy_strerror(ret)});
-        return error.CURLFailedSetURL;
-    }
-
-    // allow only the use of https.
-    ret = curl.curl_easy_setopt(handle, curl.CURLOPT_PROTOCOLS_STR, "https");
-    if (ret != curl.CURLE_OK) {
-        log.errf("failed to set libcurl protocols: {s}", .{curl.curl_easy_strerror(ret)});
-        return error.CURLFailedSetURL;
-    }
+    try setOpt(curl.CURLOPT_SSLVERSION, curl.CURL_SSLVERSION_TLSv1_2);
+    try setOpt(curl.CURLOPT_HEADERFUNCTION, headersCallback);
+    try setOpt(curl.CURLOPT_WRITEFUNCTION, writeCallback);
+    try setOpt(curl.CURLOPT_ERRORBUFFER, &errBuf[0]);
+    //try setOpt(curl.CURLOPT_PROTOCOLS_STR, "https");
 }
 
-pub fn send_query(allocator: std.mem.Allocator) ![]u8 {
-    try init();
+pub const Request = struct {
+    method: Method,
+    url: [:0]const u8,
+    body: ?body = null,
 
-    var ret = curl.curl_easy_setopt(handle, curl.CURLOPT_URL, "https://acme-staging-v02.api.letsencrypt.org/directory");
-    if (ret != curl.CURLE_OK) {
-        log.errf("failed to set libcurl url: {s}", .{curl.curl_easy_strerror(ret)});
-        return error.CURLFailedSetURL;
+    pub const body = struct {
+        content: []const u8,
+        type: Type,
+
+        pub const Type = enum {
+            JSON,
+
+            pub fn contentTypeHeader(self: Type) [:0]const u8 {
+                return switch (self) {
+                    .JSON => "Content-Type: application/json",
+                };
+            }
+        };
+    };
+
+    pub const Method = enum {
+        GET,
+        POST,
+
+        pub fn string(self: Method) [:0]const u8 {
+            return switch (self) {
+                .GET => "GET",
+                .POST => "POST",
+            };
+        }
+    };
+};
+
+pub const Respose = struct {
+    status: u64,
+    headers: std.StringHashMapUnmanaged([][]const u8),
+    body: []const u8,
+
+    pub fn deinit(self: *Respose, allocator: std.mem.Allocator) void {
+        allocator.free(self.body);
+        deinitHashMap(&self.headers, allocator);
+    }
+};
+
+fn deinitHashMap(map: *std.StringHashMapUnmanaged([][]const u8), allocator: std.mem.Allocator) void {
+    var i = map.iterator();
+    while (i.next()) |v| {
+        for (v.value_ptr.*) |item| allocator.free(item);
+        allocator.free(v.key_ptr.*);
+        allocator.free(v.value_ptr.*);
+    }
+    map.deinit(allocator);
+}
+
+pub fn query(allocator: std.mem.Allocator, request: Request) !Respose {
+    try init();
+    try setOpt(curl.CURLOPT_URL, request.url.ptr);
+    try setOpt(curl.CURLOPT_CUSTOMREQUEST, request.method.string().ptr);
+
+    var headers: ?*curl.struct_curl_slist = null;
+    defer if (headers != null) curl.curl_slist_free_all(headers);
+
+    var rData: readData = undefined;
+    if (request.body != null) {
+        rData = readData{ .buf = request.body.?.content };
+        headers = curl.curl_slist_append(headers, request.body.?.type.contentTypeHeader().ptr);
+        try setOpt(curl.CURLOPT_POST, @intCast(u64, 1));
+        try setOpt(curl.CURLOPT_READDATA, &rData);
+        try setOpt(curl.CURLOPT_READFUNCTION, readCallback);
+        try setOpt(curl.CURLOPT_POSTFIELDSIZE, rData.buf.len);
+    } else {
+        try setOpt(curl.CURLOPT_POST, @intCast(u64, 0));
+        try setOpt(curl.CURLOPT_READDATA, @intCast(usize, 0));
+        try setOpt(curl.CURLOPT_READFUNCTION, @intCast(usize, 0));
+        try setOpt(curl.CURLOPT_POSTFIELDSIZE, @intCast(usize, 0));
     }
 
     var data = writeData{ .list = std.ArrayList(u8).init(allocator) };
     errdefer data.list.deinit();
 
-    ret = curl.curl_easy_setopt(handle, curl.CURLOPT_WRITEDATA, &data);
-    if (ret != curl.CURLE_OK) {
-        log.errf("failed to set libcurl write data: {s}", .{curl.curl_easy_strerror(ret)});
-        return error.CURLFailedSetURL;
-    }
+    try setOpt(curl.CURLOPT_WRITEDATA, &data);
 
-    ret = curl.curl_easy_perform(handle);
+    var hData = headersData{ .allocator = allocator };
+    errdefer deinitHashMap(&hData.headers, allocator);
+    try setOpt(curl.CURLOPT_HEADERDATA, &hData);
+
+    try setOpt(curl.CURLOPT_HTTPHEADER, headers);
+    var ret = curl.curl_easy_perform(handle);
     if (ret != curl.CURLE_OK) {
         log.errf("libcurl failed while performing query: {s}", .{errBuf});
         return error.CURLPerformFailed;
@@ -95,11 +149,27 @@ pub fn send_query(allocator: std.mem.Allocator) ![]u8 {
         return data.err.?;
     }
 
+    if (hData.err != null) {
+        log.errf("failed while writing headers to map: {}", .{hData.err.?});
+        return data.err.?;
+    }
+
+    var code: c_long = undefined;
+    ret = curl.curl_easy_getinfo(handle, curl.CURLINFO_RESPONSE_CODE, &code);
+    if (ret != curl.CURLE_OK) {
+        log.errf("failed to set libcurl option: {s}", .{curl.curl_easy_strerror(ret)});
+        return error.CURLPerformFailed;
+    }
+
     if (verbose) {
         log.stderr.printf("{s}", .{data.list.items});
     }
 
-    return try data.list.toOwnedSlice();
+    return .{
+        .status = @intCast(u64, code),
+        .headers = hData.headers,
+        .body = try data.list.toOwnedSlice(),
+    };
 }
 
 const writeData = struct {
@@ -117,4 +187,70 @@ fn writeCallback(data: *anyopaque, _: c_uint, nmemb: c_uint, user_data: *anyopaq
     };
 
     return nmemb;
+}
+
+const readData = struct { buf: []const u8 };
+
+fn readCallback(data: *anyopaque, _: c_uint, nmemb: c_uint, user_data: *anyopaque) callconv(.C) c_uint {
+    var usr_data = @intToPtr(*readData, @ptrToInt(user_data));
+    var typed_data = @intToPtr([*]u8, @ptrToInt(data))[0..nmemb];
+    var copyLength = @min(nmemb, usr_data.buf.len);
+    std.mem.copy(u8, typed_data, usr_data.buf[0..copyLength]);
+    usr_data.buf = usr_data.buf[copyLength..];
+    return @intCast(c_uint, copyLength);
+}
+
+const headersData = struct {
+    headers: std.StringHashMapUnmanaged([][]const u8) = std.StringHashMapUnmanaged([][]const u8){},
+    allocator: std.mem.Allocator,
+    afterFirst: bool = false,
+    err: ?error{ InvalidHeader, OutOfMemory } = null,
+};
+
+fn headersCallback(data: *anyopaque, _: c_uint, nmemb: c_uint, user_data: *anyopaque) callconv(.C) c_uint {
+    var usr_data = @intToPtr(*headersData, @ptrToInt(user_data));
+    var header = @intToPtr([*]const u8, @ptrToInt(data))[0..nmemb];
+    if (!usr_data.afterFirst) {
+        usr_data.afterFirst = true;
+        return nmemb;
+    }
+    headerCallbackErr(header, usr_data) catch |err| {
+        usr_data.err = err;
+        return curl.CURLE_WRITE_ERROR;
+    };
+
+    return nmemb;
+}
+
+fn headerCallbackErr(header: []const u8, usr_data: *headersData) !void {
+    const allocator = usr_data.allocator;
+
+    if (std.mem.indexOf(u8, header, ":")) |index| {
+        var key = header[0..index];
+        var value = header[index + 1 ..];
+
+        var valueAlloc = try allocator.alloc(u8, value.len);
+        errdefer allocator.free(valueAlloc);
+        std.mem.copy(u8, valueAlloc, value);
+
+        if (usr_data.headers.get(key)) |v| {
+            var valueSlice = try allocator.alloc([]const u8, v.len + 1);
+            errdefer allocator.free(valueSlice);
+            defer allocator.free(v);
+            std.mem.copy([]const u8, valueSlice, v);
+            valueSlice[v.len] = valueAlloc;
+            try usr_data.headers.put(allocator, usr_data.headers.getKey(key).?, valueSlice);
+        } else {
+            var keyAlloc = try allocator.alloc(u8, key.len);
+            errdefer allocator.free(keyAlloc);
+            std.mem.copy(u8, keyAlloc, key);
+
+            var valueSlice = try allocator.alloc([]const u8, 1);
+            errdefer allocator.free(valueAlloc);
+            valueSlice[0] = valueAlloc;
+            try usr_data.headers.put(allocator, keyAlloc, valueSlice);
+        }
+    } else {
+        return;
+    }
 }
