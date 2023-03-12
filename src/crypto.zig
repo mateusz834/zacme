@@ -484,6 +484,51 @@ fn testKey(keyType: Key.Type) !void {
     try verifySignatureFromPublicKey(pub_key, signData, sign2);
     try verifySignatureFromPublicKey(pub2_key, signData, sign);
     try verifySignatureFromPublicKey(pub2_key, signData, sign2);
+
+    try verifySignatureFromPublicKeyWithZigCrypto(pub_key, signData, sign);
+    try verifySignatureFromPublicKeyWithZigCrypto(pub_key, signData, sign2);
+    try verifySignatureFromPublicKeyWithZigCrypto(pub2_key, signData, sign);
+    try verifySignatureFromPublicKeyWithZigCrypto(pub2_key, signData, sign2);
+}
+
+fn verifySignatureFromPublicKeyWithZigCrypto(public: Key.PublicKey, data: []const u8, sig: []const u8) !void {
+    switch (public) {
+        .ECDSA => |ecdsa| {
+            switch (ecdsa.Curve) {
+                inline .P256, .P384 => |ecCurve| {
+                    const ecc = switch (ecCurve) {
+                        .P256 => std.crypto.ecc.P256,
+                        .P384 => std.crypto.ecc.P384,
+                        else => unreachable,
+                    };
+
+                    const ecdsaAlg = switch (ecCurve) {
+                        .P256 => std.crypto.sign.ecdsa.EcdsaP256Sha256,
+                        .P384 => std.crypto.sign.ecdsa.EcdsaP384Sha384,
+                        else => unreachable,
+                    };
+
+                    var x: [ecc.Fe.encoded_length]u8 = undefined;
+                    var y: [ecc.Fe.encoded_length]u8 = undefined;
+                    std.mem.copy(u8, &x, ecdsa.X);
+                    std.mem.copy(u8, &y, ecdsa.Y);
+                    var ec = try ecc.fromAffineCoordinates(.{
+                        .x = try ecc.Fe.fromBytes(x, .Big),
+                        .y = try ecc.Fe.fromBytes(y, .Big),
+                    });
+                    var p = ecdsaAlg.PublicKey{ .p = ec };
+
+                    var signatureArr: [ecdsaAlg.Signature.encoded_length]u8 = undefined;
+                    std.mem.copy(u8, &signatureArr, sig);
+
+                    var signature = ecdsaAlg.Signature.fromBytes(signatureArr);
+                    try signature.verify(data, p);
+                },
+                else => {},
+            }
+        },
+        else => {},
+    }
 }
 
 fn verifySignatureFromPublicKey(public: Key.PublicKey, data: []const u8, sig: []const u8) !void {
