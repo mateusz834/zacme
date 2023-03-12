@@ -508,20 +508,12 @@ fn verifySignatureFromPublicKeyWithZigCrypto(public: Key.PublicKey, data: []cons
                         else => unreachable,
                     };
 
-                    var x: [ecc.Fe.encoded_length]u8 = undefined;
-                    var y: [ecc.Fe.encoded_length]u8 = undefined;
-                    std.mem.copy(u8, &x, ecdsa.X);
-                    std.mem.copy(u8, &y, ecdsa.Y);
-                    var ec = try ecc.fromAffineCoordinates(.{
-                        .x = try ecc.Fe.fromBytes(x, .Big),
-                        .y = try ecc.Fe.fromBytes(y, .Big),
-                    });
-                    var p = ecdsaAlg.PublicKey{ .p = ec };
+                    var p = ecdsaAlg.PublicKey{ .p = try ecc.fromAffineCoordinates(.{
+                        .x = try ecc.Fe.fromBytes(ecdsa.X[0..ecc.Fe.encoded_length].*, .Big),
+                        .y = try ecc.Fe.fromBytes(ecdsa.Y[0..ecc.Fe.encoded_length].*, .Big),
+                    }) };
 
-                    var signatureArr: [ecdsaAlg.Signature.encoded_length]u8 = undefined;
-                    std.mem.copy(u8, &signatureArr, sig);
-
-                    var signature = ecdsaAlg.Signature.fromBytes(signatureArr);
+                    var signature = ecdsaAlg.Signature.fromBytes(sig[0..ecdsaAlg.Signature.encoded_length].*);
                     try signature.verify(data, p);
                 },
                 else => {},
