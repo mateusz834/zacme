@@ -3,6 +3,8 @@ const log = @import("./log.zig");
 const http = @import("./http.zig");
 const crypto = @import("./crypto.zig");
 const jws = @import("./jws.zig");
+const acme = @import("./acme.zig");
+const cmd = @import("./cmd.zig");
 
 pub fn json_pretty(allocator: std.mem.Allocator, inJson: []const u8) ![]const u8 {
     var parser = std.json.Parser.init(allocator, true);
@@ -26,6 +28,8 @@ const openssl = @cImport({
     @cInclude("openssl.h");
 });
 
+const lencr = "https://acme-staging-v02.api.letsencrypt.org/directory";
+
 pub fn main() !u8 {
     defer http.deinit();
 
@@ -33,11 +37,56 @@ pub fn main() !u8 {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var out = try http.query(allocator, .{ .url = "http://google.com", .method = .POST, .body = .{ .content = "siema", .type = .JSON } });
-    defer out.deinit(allocator);
+    var c = cmd.Cmd.parseFromArgs(allocator) catch return 1;
+    defer c.deinit();
+
+    switch (c.command) {
+        .CreateAccountFromKeyFile => |create| {
+            var keyPEM = try std.fs.cwd().readFileAlloc(allocator, create.file, std.math.maxInt(usize));
+            defer allocator.free(keyPEM);
+
+            var key = try crypto.Key.from_pem(allocator, keyPEM);
+            defer key.deinit();
+
+            var client = acme.Client.init(allocator, if (create.acmeURL) |v| v else lencr, key);
+            defer client.deinit();
+
+            if (create.forceTosAccept) {
+                const Closure = struct {
+                    pub fn acceptTos(_: []const u8) bool {
+                        return true;
+                    }
+                };
+                try client.createAccount(create.contact, Closure.acceptTos);
+            } else {
+                const Closure = struct {
+                    pub fn acceptTos(tosURL: []const u8) bool {
+                        std.io.getStdOut().writer().print("Do you accept the terms of service avaliable at: \"{s}\"?", .{tosURL}) catch {};
+                        std.io.getStdOut().writer().print("\n[Y/N]: ", .{}) catch {};
+                        var char: [1]u8 = undefined;
+                        var num = std.io.getStdIn().read(&char) catch 0;
+                        if (num == 0 or !(char[0] == 'Y' or char[0] == 'y')) {
+                            return false;
+                        }
+                        return true;
+                    }
+                };
+                try client.createAccount(create.contact, Closure.acceptTos);
+            }
+        },
+    }
+
+    //var rsaPEM = try std.fs.cwd().readFileAlloc(allocator, "key.pem", 1 << 16);
+    //defer allocator.free(rsaPEM);
+
+    //var rsa = try crypto.Key.from_pem(allocator, rsaPEM);
+    //defer rsa.deinit();
+
+    //var client = acme.Client.init(allocator, "https://acme-staging-v02.api.letsencrypt.org/directory", rsa);
+    //defer client.deinit();
+    //try client.retreiveAccount();
 
     //log.stdout.print("generating RSA-2048");
-    //var rsa = try crypto.Key.generate(.{ .RSA = 2048 });
 
     //var public = try rsa.getPublicKey(allocator);
     //defer public.deinit(allocator);
