@@ -20,6 +20,10 @@ pub const Cmd = struct {
             file: []const u8,
             acmeURL: ?[:0]const u8,
         },
+        DeactivateAccount: struct {
+            file: []const u8,
+            acmeURL: ?[:0]const u8,
+        },
     };
 
     fn printUsage(programName: []const u8) void {
@@ -31,8 +35,9 @@ pub const Cmd = struct {
     fn printAccountUsage(programName: []const u8) void {
         log.stdout.printf("Usage: {s} account [command]", .{programName});
         log.stdout.printf("Commands:", .{});
-        log.stdout.printf(" - create   create new ACME account", .{});
-        log.stdout.printf(" - details  retreive ACME account details", .{});
+        log.stdout.printf(" - create      create new ACME account", .{});
+        log.stdout.printf(" - details     retreive ACME account details", .{});
+        log.stdout.printf(" - deactivate  deactivate ACME account", .{});
     }
 
     fn printAccountCreateUsage(programName: []const u8) void {
@@ -49,6 +54,13 @@ pub const Cmd = struct {
 
     fn printAccountDetailsUsage(programName: []const u8) void {
         log.stdout.printf("Usage: {s} account kid [options]", .{programName});
+        log.stdout.printf("Options:", .{});
+        log.stdout.printf("  --keyfile path     PEM-encoded private key file (required)", .{});
+        log.stdout.printf("  --acme url         directory URL of the ACME server (default: letsencrypt)", .{});
+    }
+
+    fn printAccountDeactivateUsage(programName: []const u8) void {
+        log.stdout.printf("Usage: {s} account deactivate [options]", .{programName});
         log.stdout.printf("Options:", .{});
         log.stdout.printf("  --keyfile path     PEM-encoded private key file (required)", .{});
         log.stdout.printf("  --acme url         directory URL of the ACME server (default: letsencrypt)", .{});
@@ -177,6 +189,51 @@ pub const Cmd = struct {
         } };
     }
 
+    fn parseAccountDeactivate(allocator: std.mem.Allocator, args: *std.process.ArgIterator) ParseArgsError!Command {
+        _ = allocator;
+        var expectValueFor: ?enum { File, ACME } = null;
+
+        var keyFile: ?[]const u8 = null;
+        var acmeURL: ?[:0]const u8 = null;
+
+        while (args.next()) |createArg| {
+            if (expectValueFor) |valFor| {
+                switch (valFor) {
+                    .File => {
+                        if (keyFile != null) return error.InvalidArgs;
+                        keyFile = createArg;
+                    },
+                    .ACME => {
+                        if (acmeURL != null) return error.InvalidArgs;
+                        acmeURL = createArg;
+                    },
+                }
+
+                expectValueFor = null;
+                continue;
+            }
+
+            if (std.mem.eql(u8, createArg, "--keyfile")) {
+                expectValueFor = .File;
+            } else if (std.mem.eql(u8, createArg, "--acme")) {
+                expectValueFor = .ACME;
+            } else if (std.mem.eql(u8, createArg, "--help")) {
+                return error.WantHelp;
+            } else {
+                return error.InvalidArgs;
+            }
+        }
+
+        if (expectValueFor != null or keyFile == null) {
+            return error.InvalidArgs;
+        }
+
+        return .{ .DeactivateAccount = .{
+            .file = keyFile.?,
+            .acmeURL = acmeURL,
+        } };
+    }
+
     pub fn parseFromArgs(allocator: std.mem.Allocator) !Cmd {
         var args = try std.process.argsWithAllocator(allocator);
         errdefer args.deinit();
@@ -194,6 +251,11 @@ pub const Cmd = struct {
                     } else if (std.mem.eql(u8, accountOp, "details")) {
                         break :blk Cmd.parseAccountDetails(allocator, &args) catch |err| {
                             Cmd.printAccountDetailsUsage(programName);
+                            return err;
+                        };
+                    } else if (std.mem.eql(u8, accountOp, "deactivate")) {
+                        break :blk Cmd.parseAccountDeactivate(allocator, &args) catch |err| {
+                            Cmd.printAccountDeactivateUsage(programName);
                             return err;
                         };
                     } else {
@@ -225,7 +287,7 @@ pub const Cmd = struct {
             .CreateAccountFromKeyFile => |v| {
                 if (v.contact != null) self.allocator.free(v.contact.?);
             },
-            .AccountDetails => {},
+            .AccountDetails, .DeactivateAccount => {},
         }
         self.argIter.deinit();
     }

@@ -106,6 +106,16 @@ pub fn main() !u8 {
                 }
             }
         },
+        .DeactivateAccount => |deactivate| {
+            var keyPEM = try std.fs.cwd().readFileAlloc(allocator, deactivate.file, std.math.maxInt(usize));
+            defer allocator.free(keyPEM);
+            var key = try crypto.Key.from_pem(allocator, keyPEM);
+
+            var client = acme.Client.init(allocator, if (deactivate.acmeURL) |v| v else lencr, key);
+            defer client.deinit();
+
+            try client.deactivateAccount();
+        },
     }
 
     //var rsaPEM = try std.fs.cwd().readFileAlloc(allocator, "key.pem", 1 << 16);
