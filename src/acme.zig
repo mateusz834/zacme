@@ -101,6 +101,107 @@ pub const Client = struct {
         log.stdout.printf("Found ACME account with KID \"{s}\"", .{kid});
     }
 
+    pub const AccountDetails = struct {
+        kid: []const u8,
+        status: Status,
+        contact: ?[][]const u8,
+
+        pub const Status = enum {
+            Valid,
+            Deactivated,
+            Revoked,
+            pub fn string(self: Status) []const u8 {
+                return switch (self) {
+                    .Valid => "valid",
+                    .Deactivated => "deactivated",
+                    .Revoked => "revoked",
+                };
+            }
+        };
+
+        pub fn deinit(self: *AccountDetails, allocator: std.mem.Allocator) void {
+            allocator.free(self.kid);
+            if (self.contact) |contact| {
+                for (contact) |v| {
+                    allocator.free(v);
+                }
+                allocator.free(contact);
+            }
+        }
+    };
+
+    pub fn retreiveAccountWithDetails(self: *Client, detailsAllocator: std.mem.Allocator) !AccountDetails {
+        const request = struct {
+            onlyReturnExisting: bool = false,
+        };
+
+        const r = request{ .onlyReturnExisting = true };
+
+        var directory = try self.getDirectory();
+
+        const nonce = try self.getNonce();
+        defer self.allocator.free(nonce);
+
+        log.stdout.printf("fetching ACME account from \"{s}\"", .{directory.newAccount});
+
+        var body = try jws.withJWK(self.allocator, self.accountKey, r, nonce, directory.newAccount);
+        defer self.allocator.free(body);
+
+        var out = try http.query(self.allocator, .{ .url = directory.newAccount, .method = .POST, .body = .{
+            .content = body,
+            .type = .JSON,
+        } });
+        defer out.deinit(self.allocator);
+
+        if (out.status != 200) {
+            log.stdout.printf("failed while creating account, failed with status code: {}", .{out.status});
+            try self.printErrorDetails(out.body);
+            return error.AccountCreationFailure;
+        }
+
+        try self.storeNonce(&out);
+
+        const locations = out.headers.get("location");
+        if (locations == null or locations.?.len != 1) {
+            log.stdout.printf("ACME server did not respond with Location header", .{});
+            return error.NewNonceFailure;
+        }
+
+        const kid = try detailsAllocator.alloc(u8, locations.?[0].len);
+        errdefer detailsAllocator.free(kid);
+        std.mem.copy(u8, kid, locations.?[0]);
+
+        log.stdout.printf("Found ACME account with KID \"{s}\"", .{kid});
+
+        const Respose = struct {
+            status: []const u8,
+            contact: ?[][]const u8,
+        };
+        var tokens = std.json.TokenStream.init(out.body);
+        const parseOptions = .{ .allocator = detailsAllocator, .ignore_unknown_fields = true };
+        var res = try std.json.parse(Respose, &tokens, parseOptions);
+
+        defer std.json.parseFree(Respose, res, parseOptions);
+
+        // so that json.parseFree does not free it.
+        defer res.contact = null;
+
+        var status: AccountDetails.Status = if (std.mem.eql(u8, res.status, "valid"))
+            .Valid
+        else if (std.mem.eql(u8, res.status, "deactivated"))
+            .Deactivated
+        else if (std.mem.eql(u8, res.status, "revoked"))
+            .Revoked
+        else
+            return error.UnknownStatus;
+
+        return .{
+            .kid = kid,
+            .contact = res.contact,
+            .status = status,
+        };
+    }
+
     pub fn createAccount(self: *Client, contact: ?[][]const u8, comptime acceptTOS: fn ([]const u8) bool) !void {
         const request = struct {
             contact: ?[][]const u8,

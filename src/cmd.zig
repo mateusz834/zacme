@@ -16,6 +16,10 @@ pub const Cmd = struct {
             acmeURL: ?[:0]const u8,
             contact: ?[][]const u8 = null,
         },
+        AccountDetails: struct {
+            file: []const u8,
+            acmeURL: ?[:0]const u8,
+        },
     };
 
     fn printUsage(programName: []const u8) void {
@@ -27,7 +31,8 @@ pub const Cmd = struct {
     fn printAccountUsage(programName: []const u8) void {
         log.stdout.printf("Usage: {s} account [command]", .{programName});
         log.stdout.printf("Commands:", .{});
-        log.stdout.printf(" - create - create ACME account", .{});
+        log.stdout.printf(" - create   create new ACME account", .{});
+        log.stdout.printf(" - details  retreive ACME account details", .{});
     }
 
     fn printAccountCreateUsage(programName: []const u8) void {
@@ -39,6 +44,13 @@ pub const Cmd = struct {
         log.stdout.printf("  --genkey alg       generate a new key that will be stored in keyfile", .{});
         log.stdout.printf("                     alg is one of following: RSA-size (e.g. RSA-2048), P256, P384, P521", .{});
         log.stdout.printf("                     defaults to P384", .{});
+        log.stdout.printf("  --acme url         directory URL of the ACME server (default: letsencrypt)", .{});
+    }
+
+    fn printAccountDetailsUsage(programName: []const u8) void {
+        log.stdout.printf("Usage: {s} account kid [options]", .{programName});
+        log.stdout.printf("Options:", .{});
+        log.stdout.printf("  --keyfile path     PEM-encoded private key file (required)", .{});
         log.stdout.printf("  --acme url         directory URL of the ACME server (default: letsencrypt)", .{});
     }
 
@@ -66,7 +78,7 @@ pub const Cmd = struct {
                         keyFile = createArg;
                     },
                     .ACME => {
-                        if (generateKey != null) return error.InvalidArgs;
+                        if (acmeURL != null) return error.InvalidArgs;
                         acmeURL = createArg;
                     },
                     .Key => {
@@ -80,9 +92,7 @@ pub const Cmd = struct {
                         else if (std.mem.eql(u8, createArg, "P521"))
                             .{ .ECDSA = .P521 }
                         else if (std.mem.startsWith(u8, createArg, rsaPrefix))
-                            .{
-                                .RSA = std.fmt.parseInt(u32, createArg[rsaPrefix.len..], 10) catch return error.InvalidArgs,
-                            }
+                            .{ .RSA = std.fmt.parseInt(u32, createArg[rsaPrefix.len..], 10) catch return error.InvalidArgs }
                         else
                             return error.InvalidArgs;
                     },
@@ -122,6 +132,51 @@ pub const Cmd = struct {
         } };
     }
 
+    fn parseAccountDetails(allocator: std.mem.Allocator, args: *std.process.ArgIterator) ParseArgsError!Command {
+        _ = allocator;
+        var expectValueFor: ?enum { File, ACME } = null;
+
+        var keyFile: ?[]const u8 = null;
+        var acmeURL: ?[:0]const u8 = null;
+
+        while (args.next()) |createArg| {
+            if (expectValueFor) |valFor| {
+                switch (valFor) {
+                    .File => {
+                        if (keyFile != null) return error.InvalidArgs;
+                        keyFile = createArg;
+                    },
+                    .ACME => {
+                        if (acmeURL != null) return error.InvalidArgs;
+                        acmeURL = createArg;
+                    },
+                }
+
+                expectValueFor = null;
+                continue;
+            }
+
+            if (std.mem.eql(u8, createArg, "--keyfile")) {
+                expectValueFor = .File;
+            } else if (std.mem.eql(u8, createArg, "--acme")) {
+                expectValueFor = .ACME;
+            } else if (std.mem.eql(u8, createArg, "--help")) {
+                return error.WantHelp;
+            } else {
+                return error.InvalidArgs;
+            }
+        }
+
+        if (expectValueFor != null or keyFile == null) {
+            return error.InvalidArgs;
+        }
+
+        return .{ .AccountDetails = .{
+            .file = keyFile.?,
+            .acmeURL = acmeURL,
+        } };
+    }
+
     pub fn parseFromArgs(allocator: std.mem.Allocator) !Cmd {
         var args = try std.process.argsWithAllocator(allocator);
         errdefer args.deinit();
@@ -134,6 +189,11 @@ pub const Cmd = struct {
                     if (std.mem.eql(u8, accountOp, "create")) {
                         break :blk Cmd.parseAccountCreate(allocator, &args) catch |err| {
                             Cmd.printAccountCreateUsage(programName);
+                            return err;
+                        };
+                    } else if (std.mem.eql(u8, accountOp, "details")) {
+                        break :blk Cmd.parseAccountDetails(allocator, &args) catch |err| {
+                            Cmd.printAccountDetailsUsage(programName);
                             return err;
                         };
                     } else {
@@ -165,6 +225,7 @@ pub const Cmd = struct {
             .CreateAccountFromKeyFile => |v| {
                 if (v.contact != null) self.allocator.free(v.contact.?);
             },
+            .AccountDetails => {},
         }
         self.argIter.deinit();
     }

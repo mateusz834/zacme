@@ -87,6 +87,25 @@ pub fn main() !u8 {
                 try client.createAccount(create.contact, Closure.acceptTos);
             }
         },
+        .AccountDetails => |details| {
+            var keyPEM = try std.fs.cwd().readFileAlloc(allocator, details.file, std.math.maxInt(usize));
+            defer allocator.free(keyPEM);
+            var key = try crypto.Key.from_pem(allocator, keyPEM);
+
+            var client = acme.Client.init(allocator, if (details.acmeURL) |v| v else lencr, key);
+            defer client.deinit();
+
+            var d = try client.retreiveAccountWithDetails(allocator);
+            defer d.deinit(allocator);
+
+            std.io.getStdOut().writer().print("KID: \"{s}\"\n", .{d.kid}) catch {};
+            std.io.getStdOut().writer().print("Status: \"{s}\"\n", .{d.status.string()}) catch {};
+            if (d.contact) |contacts| {
+                for (contacts) |contact| {
+                    std.io.getStdOut().writer().print("Contact: \"{s}\"\n", .{contact}) catch {};
+                }
+            }
+        },
     }
 
     //var rsaPEM = try std.fs.cwd().readFileAlloc(allocator, "key.pem", 1 << 16);
