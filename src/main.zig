@@ -42,10 +42,23 @@ pub fn main() !u8 {
 
     switch (c.command) {
         .CreateAccountFromKeyFile => |create| {
-            var keyPEM = try std.fs.cwd().readFileAlloc(allocator, create.file, std.math.maxInt(usize));
-            defer allocator.free(keyPEM);
+            var key = if (create.generateKey == null) blk: {
+                var keyPEM = try std.fs.cwd().readFileAlloc(allocator, create.file, std.math.maxInt(usize));
+                defer allocator.free(keyPEM);
+                break :blk try crypto.Key.from_pem(allocator, keyPEM);
+            } else blk: {
+                var key = try crypto.Key.generate(create.generateKey.?);
+                var keyPEM = try key.to_pem(allocator);
+                defer allocator.free(keyPEM);
 
-            var key = try crypto.Key.from_pem(allocator, keyPEM);
+                var file = try std.fs.cwd().createFile(create.file, .{
+                    .exclusive = true,
+                    .mode = 0o660,
+                });
+                defer file.close();
+                try file.writeAll(keyPEM);
+                break :blk key;
+            };
             defer key.deinit();
 
             var client = acme.Client.init(allocator, if (create.acmeURL) |v| v else lencr, key);

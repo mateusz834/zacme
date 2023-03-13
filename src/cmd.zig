@@ -1,5 +1,6 @@
 const std = @import("std");
 const log = @import("./log.zig");
+const crypto = @import("./crypto.zig");
 
 pub const Cmd = struct {
     argIter: std.process.ArgIterator,
@@ -10,6 +11,7 @@ pub const Cmd = struct {
     pub const Command = union(enum) {
         CreateAccountFromKeyFile: struct {
             file: []const u8,
+            generateKey: ?crypto.Key.Type = null,
             forceTosAccept: bool,
             acmeURL: ?[:0]const u8,
             contact: ?[][]const u8 = null,
@@ -34,6 +36,9 @@ pub const Cmd = struct {
         log.stdout.printf("  --tosaccept        agree to terms of service without user interacton", .{});
         log.stdout.printf("  --contact contact  provide ACME contact information (multiple allowed)", .{});
         log.stdout.printf("  --keyfile path     PEM-encoded private key file (required)", .{});
+        log.stdout.printf("  --genkey alg       generate a new key that will be stored in keyfile", .{});
+        log.stdout.printf("                     alg is one of following: RSA-size (e.g. RSA-2048), P256, P384, P521", .{});
+        log.stdout.printf("                     defaults to P384", .{});
         log.stdout.printf("  --acme url         directory URL of the ACME server (default: letsencrypt)", .{});
     }
 
@@ -43,10 +48,11 @@ pub const Cmd = struct {
     } || std.mem.Allocator.Error;
 
     fn parseAccountCreate(allocator: std.mem.Allocator, args: *std.process.ArgIterator) ParseArgsError!Command {
-        var expectValueFor: ?enum { Contact, File, ACME } = null;
+        var expectValueFor: ?enum { Contact, File, ACME, Key } = null;
 
         var keyFile: ?[]const u8 = null;
         var acmeURL: ?[:0]const u8 = null;
+        var generateKey: ?crypto.Key.Type = null;
         var tosAccept = false;
         var contact = std.ArrayList([]const u8).init(allocator);
         errdefer contact.deinit();
@@ -60,8 +66,25 @@ pub const Cmd = struct {
                         keyFile = createArg;
                     },
                     .ACME => {
-                        if (acmeURL != null) return error.InvalidArgs;
+                        if (generateKey != null) return error.InvalidArgs;
                         acmeURL = createArg;
+                    },
+                    .Key => {
+                        if (generateKey != null) return error.InvalidArgs;
+
+                        const rsaPrefix = "RSA-";
+                        generateKey = if (std.mem.eql(u8, createArg, "P256"))
+                            .{ .ECDSA = .P256 }
+                        else if (std.mem.eql(u8, createArg, "P384"))
+                            .{ .ECDSA = .P384 }
+                        else if (std.mem.eql(u8, createArg, "P521"))
+                            .{ .ECDSA = .P521 }
+                        else if (std.mem.startsWith(u8, createArg, rsaPrefix))
+                            .{
+                                .RSA = std.fmt.parseInt(u32, createArg[rsaPrefix.len..], 10) catch return error.InvalidArgs,
+                            }
+                        else
+                            return error.InvalidArgs;
                     },
                 }
 
@@ -77,6 +100,8 @@ pub const Cmd = struct {
                 expectValueFor = .File;
             } else if (std.mem.eql(u8, createArg, "--acme")) {
                 expectValueFor = .ACME;
+            } else if (std.mem.eql(u8, createArg, "--genkey")) {
+                expectValueFor = .Key;
             } else if (std.mem.eql(u8, createArg, "--help")) {
                 return error.WantHelp;
             } else {
@@ -90,6 +115,7 @@ pub const Cmd = struct {
 
         return .{ .CreateAccountFromKeyFile = .{
             .file = keyFile.?,
+            .generateKey = generateKey,
             .forceTosAccept = tosAccept,
             .contact = if (contact.items.len == 0) null else try contact.toOwnedSlice(),
             .acmeURL = acmeURL,
