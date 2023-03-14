@@ -48,7 +48,7 @@ pub fn main() !u8 {
                 break :blk try crypto.Key.from_pem(allocator, keyPEM);
             } else blk: {
                 var key = try crypto.Key.generate(create.generateKey.?);
-				errdefer key.deinit();
+                errdefer key.deinit();
 
                 var keyPEM = try key.to_pem(allocator);
                 defer allocator.free(keyPEM);
@@ -132,7 +132,7 @@ pub fn main() !u8 {
                 break :blk try crypto.Key.from_pem(allocator, keyPEM);
             } else blk: {
                 var newKey = try crypto.Key.generate(rollover.generateKey.?);
-				errdefer newKey.deinit();
+                errdefer newKey.deinit();
 
                 var keyPEM = try newKey.to_pem(allocator);
                 defer allocator.free(keyPEM);
@@ -151,6 +151,21 @@ pub fn main() !u8 {
             defer client.deinit();
 
             try client.rolloverAccountKey(newKey);
+        },
+        .AccountUpdate => |update| {
+            var key = blk: {
+                var keyPEM = try std.fs.cwd().readFileAlloc(allocator, update.file, std.math.maxInt(usize));
+                defer allocator.free(keyPEM);
+                break :blk try crypto.Key.from_pem(allocator, keyPEM);
+            };
+            defer key.deinit();
+
+            var client = acme.Client.init(allocator, if (update.acmeURL) |v| v else lencr, key);
+            defer client.deinit();
+
+            try client.updateAccount(.{
+                .contact = update.contact,
+            });
         },
     }
 

@@ -333,6 +333,41 @@ pub const Client = struct {
         self.accountKey = newKey;
     }
 
+    pub const AccountUpdateRequest = struct {
+        contact: ?[][]const u8,
+    };
+
+    pub fn updateAccount(self: *Client, r: AccountUpdateRequest) !void {
+        var d = try self.retreiveAccountWithDetails(self.allocator);
+        defer d.deinit(self.allocator);
+
+        const nonce = try self.getNonce();
+        defer self.allocator.free(nonce);
+
+        // TODO: eliminate that step
+        // store null-terminaked kid in Client.
+        const kidZero = try self.allocator.alloc(u8, d.kid.len + 1);
+        defer self.allocator.free(kidZero);
+        std.mem.copy(u8, kidZero, d.kid);
+        kidZero[d.kid.len] = 0;
+
+        var body = try jws.withKID(self.allocator, self.accountKey, r, nonce, d.kid, d.kid);
+        defer self.allocator.free(body);
+
+        var out = try http.query(self.allocator, .{ .url = kidZero[0..d.kid.len :0], .method = .POST, .body = .{
+            .content = body,
+            .type = .JSON,
+        } });
+        defer out.deinit(self.allocator);
+
+        if (out.status != 200) {
+            log.stdout.printf("failed while updating the ACME account details, failed with status code: {}", .{out.status});
+            return error.AccountUpdateFailure;
+        }
+
+        try self.storeNonce(&out);
+    }
+
     fn storeNonce(self: *Client, response: *http.Respose) !void {
         if (self.nonce == null) {
             var nonces = response.headers.get("replay-nonce");

@@ -30,6 +30,11 @@ pub const Cmd = struct {
             generateKey: ?crypto.Key.Type = null,
             acmeURL: ?[:0]const u8,
         },
+        AccountUpdate: struct {
+            file: []const u8,
+            contact: ?[][]const u8,
+            acmeURL: ?[:0]const u8,
+        },
     };
 
     fn printUsage(programName: []const u8) void {
@@ -45,6 +50,7 @@ pub const Cmd = struct {
         log.stdout.printf(" - details     retreive ACME account details", .{});
         log.stdout.printf(" - deactivate  deactivate ACME account", .{});
         log.stdout.printf(" - rollover    rollover the ACME account key", .{});
+        log.stdout.printf(" - update      update ACME account information", .{});
     }
 
     fn printAccountCreateUsage(programName: []const u8) void {
@@ -81,6 +87,15 @@ pub const Cmd = struct {
         log.stdout.printf("  --genkey alg       generate a new key that will be stored in keyfile", .{});
         log.stdout.printf("                     alg is one of following: RSA-size (e.g. RSA-2048), P256, P384, P521", .{});
         log.stdout.printf("                     defaults to P384", .{});
+        log.stdout.printf("  --acme url         directory URL of the ACME server (default: letsencrypt)", .{});
+    }
+
+    fn printAccountUpdateUsage(programName: []const u8) void {
+        log.stdout.printf("Usage: {s} account update [options]", .{programName});
+        log.stdout.printf("Options:", .{});
+        log.stdout.printf("  --keyfile path     PEM-encoded private key file (required)", .{});
+        log.stdout.printf("  --contact contact  provide ACME contact information (multiple allowed)", .{});
+        log.stdout.printf("  --removecontact    remove contact information", .{});
         log.stdout.printf("  --acme url         directory URL of the ACME server (default: letsencrypt)", .{});
     }
 
@@ -324,6 +339,60 @@ pub const Cmd = struct {
         } };
     }
 
+    fn parseAccountUpdate(allocator: std.mem.Allocator, args: *std.process.ArgIterator) ParseArgsError!Command {
+        var expectValueFor: ?enum { File, ACME, Contact } = null;
+
+        var keyFile: ?[]const u8 = null;
+        var acmeURL: ?[:0]const u8 = null;
+
+        var removeContact = false;
+        var contact = std.ArrayList([]const u8).init(allocator);
+        errdefer contact.deinit();
+
+        while (args.next()) |createArg| {
+            if (expectValueFor) |valFor| {
+                switch (valFor) {
+                    .Contact => try contact.append(createArg),
+                    .File => {
+                        if (keyFile != null) return error.InvalidArgs;
+                        keyFile = createArg;
+                    },
+                    .ACME => {
+                        if (acmeURL != null) return error.InvalidArgs;
+                        acmeURL = createArg;
+                    },
+                }
+
+                expectValueFor = null;
+                continue;
+            }
+
+            if (std.mem.eql(u8, createArg, "--keyfile")) {
+                expectValueFor = .File;
+            } else if (std.mem.eql(u8, createArg, "--acme")) {
+                expectValueFor = .ACME;
+            } else if (std.mem.eql(u8, createArg, "--contact")) {
+                expectValueFor = .Contact;
+            } else if (std.mem.eql(u8, createArg, "--removecontact")) {
+                removeContact = true;
+            } else if (std.mem.eql(u8, createArg, "--help")) {
+                return error.WantHelp;
+            } else {
+                return error.InvalidArgs;
+            }
+        }
+
+        if (expectValueFor != null or keyFile == null or (removeContact and contact.items.len != 0) or (!removeContact and contact.items.len == 0)) {
+            return error.InvalidArgs;
+        }
+
+        return .{ .AccountUpdate = .{
+            .file = keyFile.?,
+            .acmeURL = acmeURL,
+            .contact = if (contact.items.len != 0 or removeContact) try contact.toOwnedSlice() else null,
+        } };
+    }
+
     pub fn parseFromArgs(allocator: std.mem.Allocator) !Cmd {
         var args = try std.process.argsWithAllocator(allocator);
         errdefer args.deinit();
@@ -353,6 +422,11 @@ pub const Cmd = struct {
                             Cmd.printAccountRolloverUsage(programName);
                             return err;
                         };
+                    } else if (std.mem.eql(u8, accountOp, "update")) {
+                        break :blk Cmd.parseAccountUpdate(allocator, &args) catch |err| {
+                            Cmd.printAccountUpdateUsage(programName);
+                            return err;
+                        };
                     } else {
                         Cmd.printAccountUsage(programName);
                         return error.unk;
@@ -378,7 +452,7 @@ pub const Cmd = struct {
 
     pub fn deinit(self: *Cmd) void {
         switch (self.command) {
-            .CreateAccountFromKeyFile => |v| {
+            inline .CreateAccountFromKeyFile, .AccountUpdate => |v| {
                 if (v.contact != null) self.allocator.free(v.contact.?);
             },
             .AccountDetails, .DeactivateAccount, .AccountKeyRollover => {},
