@@ -13,7 +13,7 @@ pub const Client = struct {
     nonce: ?[]const u8 = null,
 
     pub const Directory = struct {
-        keyChange: []const u8,
+        keyChange: [:0]const u8,
         newAccount: [:0]const u8,
         // TODO: how json parser handles this kind of slices?
         newNonce: [:0]const u8,
@@ -175,7 +175,7 @@ pub const Client = struct {
 
         const Respose = struct {
             status: []const u8,
-            contact: ?[][]const u8,
+            contact: ?[][]const u8 = null,
         };
         var tokens = std.json.TokenStream.init(out.body);
         const parseOptions = .{ .allocator = detailsAllocator, .ignore_unknown_fields = true };
@@ -285,6 +285,52 @@ pub const Client = struct {
         }
 
         try self.storeNonce(&out);
+    }
+
+    pub fn rolloverAccountKey(self: *Client, newKey: crypto.Key) !void {
+        const keyChange = struct {
+            account: []const u8,
+            oldKey: jws.JWK,
+        };
+
+        var d = try self.retreiveAccountWithDetails(self.allocator);
+        defer d.deinit(self.allocator);
+
+        var public = try self.accountKey.getPublicKey(self.allocator);
+        defer public.deinit(self.allocator);
+
+        var kc = keyChange{
+            .account = d.kid,
+            .oldKey = try jws.JWK.fromCryptoPublicKey(self.allocator, public),
+        };
+        defer kc.oldKey.deinit(self.allocator);
+
+        var dir = try self.getDirectory();
+
+        var inner = try jws.withJWK(self.allocator, newKey, kc, null, dir.keyChange);
+        defer self.allocator.free(inner);
+
+        const nonce = try self.getNonce();
+        defer self.allocator.free(nonce);
+
+        var body = try jws.withKID(self.allocator, self.accountKey, inner, nonce, dir.keyChange, d.kid);
+        defer self.allocator.free(body);
+
+        var out = try http.query(self.allocator, .{ .url = dir.keyChange, .method = .POST, .body = .{
+            .content = body,
+            .type = .JSON,
+        } });
+        defer out.deinit(self.allocator);
+
+        if (out.status != 200) {
+            log.stdout.printf("failed while making ACME key rollover, failed with status code: {}", .{out.status});
+            return error.AccountKeyRolloverFailure;
+        }
+
+        try self.storeNonce(&out);
+
+        //self.accountKey.deinit();
+        self.accountKey = newKey;
     }
 
     fn storeNonce(self: *Client, response: *http.Respose) !void {

@@ -24,6 +24,12 @@ pub const Cmd = struct {
             file: []const u8,
             acmeURL: ?[:0]const u8,
         },
+        AccountKeyRollover: struct {
+            file: []const u8,
+            newFile: []const u8,
+            generateKey: ?crypto.Key.Type = null,
+            acmeURL: ?[:0]const u8,
+        },
     };
 
     fn printUsage(programName: []const u8) void {
@@ -38,6 +44,7 @@ pub const Cmd = struct {
         log.stdout.printf(" - create      create new ACME account", .{});
         log.stdout.printf(" - details     retreive ACME account details", .{});
         log.stdout.printf(" - deactivate  deactivate ACME account", .{});
+        log.stdout.printf(" - rollover    rollover the ACME account key", .{});
     }
 
     fn printAccountCreateUsage(programName: []const u8) void {
@@ -63,6 +70,17 @@ pub const Cmd = struct {
         log.stdout.printf("Usage: {s} account deactivate [options]", .{programName});
         log.stdout.printf("Options:", .{});
         log.stdout.printf("  --keyfile path     PEM-encoded private key file (required)", .{});
+        log.stdout.printf("  --acme url         directory URL of the ACME server (default: letsencrypt)", .{});
+    }
+
+    fn printAccountRolloverUsage(programName: []const u8) void {
+        log.stdout.printf("Usage: {s} account rollover [options]", .{programName});
+        log.stdout.printf("Options:", .{});
+        log.stdout.printf("  --keyfile path     PEM-encoded private key file (required)", .{});
+        log.stdout.printf("  --newkeyfile path  PEM-encoded private key file (required)", .{});
+        log.stdout.printf("  --genkey alg       generate a new key that will be stored in keyfile", .{});
+        log.stdout.printf("                     alg is one of following: RSA-size (e.g. RSA-2048), P256, P384, P521", .{});
+        log.stdout.printf("                     defaults to P384", .{});
         log.stdout.printf("  --acme url         directory URL of the ACME server (default: letsencrypt)", .{});
     }
 
@@ -137,8 +155,8 @@ pub const Cmd = struct {
 
         return .{ .CreateAccountFromKeyFile = .{
             .file = keyFile.?,
-            .generateKey = generateKey,
             .forceTosAccept = tosAccept,
+            .generateKey = generateKey,
             .contact = if (contact.items.len == 0) null else try contact.toOwnedSlice(),
             .acmeURL = acmeURL,
         } };
@@ -234,6 +252,78 @@ pub const Cmd = struct {
         } };
     }
 
+    fn parseAccountRollover(allocator: std.mem.Allocator, args: *std.process.ArgIterator) ParseArgsError!Command {
+        _ = allocator;
+        var expectValueFor: ?enum { File, NewFile, Key, ACME } = null;
+
+        var keyFile: ?[]const u8 = null;
+        var newKeyFile: ?[]const u8 = null;
+        var acmeURL: ?[:0]const u8 = null;
+        var generateKey: ?crypto.Key.Type = null;
+
+        while (args.next()) |createArg| {
+            if (expectValueFor) |valFor| {
+                switch (valFor) {
+                    .File => {
+                        if (keyFile != null) return error.InvalidArgs;
+                        keyFile = createArg;
+                    },
+                    .NewFile => {
+                        if (newKeyFile != null) return error.InvalidArgs;
+                        newKeyFile = createArg;
+                    },
+                    .ACME => {
+                        if (acmeURL != null) return error.InvalidArgs;
+                        acmeURL = createArg;
+                    },
+                    .Key => {
+                        if (generateKey != null) return error.InvalidArgs;
+
+                        const rsaPrefix = "RSA-";
+                        generateKey = if (std.mem.eql(u8, createArg, "P256"))
+                            .{ .ECDSA = .P256 }
+                        else if (std.mem.eql(u8, createArg, "P384"))
+                            .{ .ECDSA = .P384 }
+                        else if (std.mem.eql(u8, createArg, "P521"))
+                            .{ .ECDSA = .P521 }
+                        else if (std.mem.startsWith(u8, createArg, rsaPrefix))
+                            .{ .RSA = std.fmt.parseInt(u32, createArg[rsaPrefix.len..], 10) catch return error.InvalidArgs }
+                        else
+                            return error.InvalidArgs;
+                    },
+                }
+
+                expectValueFor = null;
+                continue;
+            }
+
+            if (std.mem.eql(u8, createArg, "--keyfile")) {
+                expectValueFor = .File;
+            } else if (std.mem.eql(u8, createArg, "--newkeyfile")) {
+                expectValueFor = .NewFile;
+            } else if (std.mem.eql(u8, createArg, "--acme")) {
+                expectValueFor = .ACME;
+            } else if (std.mem.eql(u8, createArg, "--genkey")) {
+                expectValueFor = .Key;
+            } else if (std.mem.eql(u8, createArg, "--help")) {
+                return error.WantHelp;
+            } else {
+                return error.InvalidArgs;
+            }
+        }
+
+        if (expectValueFor != null or keyFile == null or newKeyFile == null) {
+            return error.InvalidArgs;
+        }
+
+        return .{ .AccountKeyRollover = .{
+            .file = keyFile.?,
+            .newFile = newKeyFile.?,
+            .generateKey = generateKey,
+            .acmeURL = acmeURL,
+        } };
+    }
+
     pub fn parseFromArgs(allocator: std.mem.Allocator) !Cmd {
         var args = try std.process.argsWithAllocator(allocator);
         errdefer args.deinit();
@@ -258,6 +348,11 @@ pub const Cmd = struct {
                             Cmd.printAccountDeactivateUsage(programName);
                             return err;
                         };
+                    } else if (std.mem.eql(u8, accountOp, "rollover")) {
+                        break :blk Cmd.parseAccountRollover(allocator, &args) catch |err| {
+                            Cmd.printAccountRolloverUsage(programName);
+                            return err;
+                        };
                     } else {
                         Cmd.printAccountUsage(programName);
                         return error.unk;
@@ -274,7 +369,6 @@ pub const Cmd = struct {
             return error.unk;
         };
 
-        log.stdout.printf("Program Name: {s}", .{programName});
         return .{
             .argIter = args,
             .command = command,
@@ -287,7 +381,7 @@ pub const Cmd = struct {
             .CreateAccountFromKeyFile => |v| {
                 if (v.contact != null) self.allocator.free(v.contact.?);
             },
-            .AccountDetails, .DeactivateAccount => {},
+            .AccountDetails, .DeactivateAccount, .AccountKeyRollover => {},
         }
         self.argIter.deinit();
     }

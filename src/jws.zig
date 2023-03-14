@@ -20,12 +20,12 @@ fn jwkCurveName(curve: crypto.Key.Type.Curve) []const u8 {
     };
 }
 
-const jwk = union(enum) {
+pub const JWK = union(enum) {
     RSA: struct { E: []const u8, N: []const u8 },
     ECDSA: struct { Curve: []const u8, X: []const u8, Y: []const u8 },
 
     pub fn jsonStringify(
-        self: jwk,
+        self: JWK,
         options: std.json.StringifyOptions,
         out_stream: anytype,
     ) @TypeOf(out_stream).Error!void {
@@ -56,13 +56,45 @@ const jwk = union(enum) {
             },
         }
     }
+
+    pub fn deinit(self: JWK, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .RSA => |rsa| {
+                allocator.free(rsa.E);
+                allocator.free(rsa.N);
+            },
+            .ECDSA => |ecdsa| {
+                allocator.free(ecdsa.X);
+                allocator.free(ecdsa.Y);
+            },
+        }
+    }
+
+    pub fn fromCryptoPublicKey(allocator: std.mem.Allocator, public: crypto.Key.PublicKey) !JWK {
+        switch (public) {
+            .RSA => |rsa| {
+                var e = try encodeBase64(allocator, rsa.E);
+                errdefer allocator.free(e);
+                var n = try encodeBase64(allocator, rsa.N);
+                errdefer allocator.free(n);
+                return .{ .RSA = .{ .E = e, .N = n } };
+            },
+            .ECDSA => |ecdsa| {
+                var x = try encodeBase64(allocator, ecdsa.X);
+                errdefer allocator.free(x);
+                var y = try encodeBase64(allocator, ecdsa.Y);
+                errdefer allocator.free(y);
+                return .{ .ECDSA = .{ .Curve = jwkCurveName(ecdsa.Curve), .X = x, .Y = y } };
+            },
+        }
+    }
 };
 
 const headers = struct {
     alg: []const u8,
-    nonce: []const u8,
+    nonce: ?[]const u8,
     url: []const u8,
-    jwk: ?jwk = null,
+    jwk: ?JWK = null,
     kid: ?[]const u8 = null,
 };
 
@@ -75,7 +107,7 @@ pub fn withKID(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, 
     });
 }
 
-pub fn withJWK(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, nonce: []const u8, url: []const u8) ![]const u8 {
+pub fn withJWK(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, nonce: ?[]const u8, url: []const u8) ![]const u8 {
     var hdrs = headers{
         .alg = jwsAlgName(key),
         .nonce = nonce,
@@ -85,26 +117,10 @@ pub fn withJWK(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, 
     var public = try key.getPublicKey(allocator);
     defer public.deinit(allocator);
 
-    switch (public) {
-        .RSA => |rsa| {
-            var e = try encodeBase64(allocator, rsa.E);
-            defer allocator.free(e);
-            var n = try encodeBase64(allocator, rsa.N);
-            defer allocator.free(n);
+    hdrs.jwk = try JWK.fromCryptoPublicKey(allocator, public);
+    defer hdrs.jwk.?.deinit(allocator);
 
-            hdrs.jwk = .{ .RSA = .{ .E = e, .N = n } };
-            return jws(allocator, key, payload, hdrs);
-        },
-        .ECDSA => |ecdsa| {
-            var x = try encodeBase64(allocator, ecdsa.X);
-            defer allocator.free(x);
-            var y = try encodeBase64(allocator, ecdsa.Y);
-            defer allocator.free(y);
-
-            hdrs.jwk = .{ .ECDSA = .{ .Curve = jwkCurveName(ecdsa.Curve), .X = x, .Y = y } };
-            return jws(allocator, key, payload, hdrs);
-        },
-    }
+    return jws(allocator, key, payload, hdrs);
 }
 
 const base64Encoder = std.base64.url_safe_no_pad.Encoder;
@@ -118,8 +134,13 @@ fn jws(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, hdrs: he
     var jsonHeaders = try std.json.stringifyAlloc(allocator, hdrs, .{ .emit_null_optional_fields = false });
     defer allocator.free(jsonHeaders);
 
-    var jsonPayload = try std.json.stringifyAlloc(allocator, payload, .{});
-    defer allocator.free(jsonPayload);
+    var jsonPayload: []const u8 = if (@TypeOf(payload) != []const u8) blk: {
+        break :blk try std.json.stringifyAlloc(allocator, payload, .{});
+    } else blk: {
+        break :blk payload;
+	};
+
+    defer if (@TypeOf(payload) != []const u8) allocator.free(jsonPayload);
 
     var sizeJsonHeadersAsBase64 = base64Encoder.calcSize(jsonHeaders.len);
     var sizeJsonPayloadAsBase64 = base64Encoder.calcSize(jsonPayload.len);
