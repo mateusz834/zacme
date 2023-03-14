@@ -138,7 +138,7 @@ fn jws(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, hdrs: he
         break :blk try std.json.stringifyAlloc(allocator, payload, .{});
     } else blk: {
         break :blk payload;
-	};
+    };
 
     defer if (@TypeOf(payload) != []const u8) allocator.free(jsonPayload);
 
