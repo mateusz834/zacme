@@ -320,8 +320,6 @@ pub const Client = struct {
             log.stdout.printf("failed while updating the ACME account details, failed with status code: {}", .{out.status});
             return error.AccountUpdateFailure;
         }
-
-        try self.storeNonce(&out);
     }
 
     fn getKID(self: *Client) ![:0]const u8 {
