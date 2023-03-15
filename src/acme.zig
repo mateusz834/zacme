@@ -11,6 +11,7 @@ pub const Client = struct {
 
     directory: ?Directory = null,
     nonce: ?[]const u8 = null,
+    kid: ?[]const u8 = null,
 
     pub const Directory = struct {
         keyChange: [:0]const u8,
@@ -40,6 +41,7 @@ pub const Client = struct {
             const parseOptions = .{ .allocator = self.allocator, .ignore_unknown_fields = true };
             std.json.parseFree(Directory, self.directory.?, parseOptions);
         }
+        if (self.kid) |kid| self.allocator.free(kid);
     }
 
     fn printErrorDetails(self: *Client, body: []const u8) !void {
@@ -60,6 +62,42 @@ pub const Client = struct {
         }
     }
 
+    fn queryWithJWK(self: *Client, url: [:0]const u8, payload: anytype) !http.Respose {
+        const nonce = try self.getNonce();
+        defer self.allocator.free(nonce);
+
+        var body = try jws.withJWK(self.allocator, self.accountKey, payload, nonce, url);
+        defer self.allocator.free(body);
+
+        var out = try http.query(self.allocator, .{ .url = url, .method = .POST, .body = .{
+            .content = body,
+            .type = .JSON,
+        } });
+        errdefer out.deinit(self.allocator);
+
+        try self.storeNonce(&out);
+        return out;
+    }
+
+    fn queryWithKID(self: *Client, url: [:0]const u8, payload: anytype) !http.Respose {
+        const kid = try self.getKID();
+
+        const nonce = try self.getNonce();
+        defer self.allocator.free(nonce);
+
+        var body = try jws.withKID(self.allocator, self.accountKey, payload, nonce, kid, url);
+        defer self.allocator.free(body);
+
+        var out = try http.query(self.allocator, .{ .url = url, .method = .POST, .body = .{
+            .content = body,
+            .type = .JSON,
+        } });
+        errdefer out.deinit(self.allocator);
+
+        try self.storeNonce(&out);
+        return out;
+    }
+
     pub fn retreiveAccount(self: *Client) !void {
         const request = struct {
             onlyReturnExisting: bool = false,
@@ -69,18 +107,9 @@ pub const Client = struct {
 
         var directory = try self.getDirectory();
 
-        const nonce = try self.getNonce();
-        defer self.allocator.free(nonce);
-
         log.stdout.printf("fetching ACME account from \"{s}\"", .{directory.newAccount});
 
-        var body = try jws.withJWK(self.allocator, self.accountKey, r, nonce, directory.newAccount);
-        defer self.allocator.free(body);
-
-        var out = try http.query(self.allocator, .{ .url = directory.newAccount, .method = .POST, .body = .{
-            .content = body,
-            .type = .JSON,
-        } });
+        var out = try self.queryWithJWK(directory.newAccount, r);
         defer out.deinit(self.allocator);
 
         if (out.status != 200) {
@@ -88,8 +117,6 @@ pub const Client = struct {
             try self.printErrorDetails(out.body);
             return error.AccountCreationFailure;
         }
-
-        try self.storeNonce(&out);
 
         const locations = out.headers.get("location");
         if (locations == null or locations.?.len != 1) {
@@ -139,18 +166,9 @@ pub const Client = struct {
 
         var directory = try self.getDirectory();
 
-        const nonce = try self.getNonce();
-        defer self.allocator.free(nonce);
-
         log.stdout.printf("fetching ACME account from \"{s}\"", .{directory.newAccount});
 
-        var body = try jws.withJWK(self.allocator, self.accountKey, r, nonce, directory.newAccount);
-        defer self.allocator.free(body);
-
-        var out = try http.query(self.allocator, .{ .url = directory.newAccount, .method = .POST, .body = .{
-            .content = body,
-            .type = .JSON,
-        } });
+        var out = try self.queryWithJWK(directory.newAccount, r);
         defer out.deinit(self.allocator);
 
         if (out.status != 200) {
@@ -158,8 +176,6 @@ pub const Client = struct {
             try self.printErrorDetails(out.body);
             return error.AccountCreationFailure;
         }
-
-        try self.storeNonce(&out);
 
         const locations = out.headers.get("location");
         if (locations == null or locations.?.len != 1) {
@@ -216,24 +232,13 @@ pub const Client = struct {
             .termsOfServiceAgreed = acceptTOS(directory.meta.termsOfService),
         };
 
-        const nonce = try self.getNonce();
-        defer self.allocator.free(nonce);
-
-        var body = try jws.withJWK(self.allocator, self.accountKey, r, nonce, directory.newAccount);
-        defer self.allocator.free(body);
-
-        var out = try http.query(self.allocator, .{ .url = directory.newAccount, .method = .POST, .body = .{
-            .content = body,
-            .type = .JSON,
-        } });
+        var out = try self.queryWithJWK(directory.newAccount, r);
         defer out.deinit(self.allocator);
 
         if (out.status != 201 and out.status != 200) {
             log.stdout.printf("failed while creating account, failed with status code: {}", .{out.status});
             return error.AccountCreationFailure;
         }
-
-        try self.storeNonce(&out);
 
         const locations = out.headers.get("location");
         if (locations == null or locations.?.len != 1) {
@@ -257,34 +262,14 @@ pub const Client = struct {
 
         const r = request{ .status = "deactivated" };
 
-        var d = try self.retreiveAccountWithDetails(self.allocator);
-        defer d.deinit(self.allocator);
-
-        const nonce = try self.getNonce();
-        defer self.allocator.free(nonce);
-
-        // TODO: eliminate that step
-        // store null-terminaked kid in Client.
-        const kidZero = try self.allocator.alloc(u8, d.kid.len + 1);
-        defer self.allocator.free(kidZero);
-        std.mem.copy(u8, kidZero, d.kid);
-        kidZero[d.kid.len] = 0;
-
-        var body = try jws.withKID(self.allocator, self.accountKey, r, nonce, d.kid, d.kid);
-        defer self.allocator.free(body);
-
-        var out = try http.query(self.allocator, .{ .url = kidZero[0..d.kid.len :0], .method = .POST, .body = .{
-            .content = body,
-            .type = .JSON,
-        } });
+        const kid = try self.getKID();
+        var out = try self.queryWithKID(kid, r);
         defer out.deinit(self.allocator);
 
         if (out.status != 200) {
             log.stdout.printf("failed while deactivating the ACME account, failed with status code: {}", .{out.status});
             return error.AccountCreationFailure;
         }
-
-        try self.storeNonce(&out);
     }
 
     pub fn rolloverAccountKey(self: *Client, newKey: crypto.Key) !void {
@@ -310,24 +295,13 @@ pub const Client = struct {
         var inner = try jws.withJWK(self.allocator, newKey, kc, null, dir.keyChange);
         defer self.allocator.free(inner);
 
-        const nonce = try self.getNonce();
-        defer self.allocator.free(nonce);
-
-        var body = try jws.withKID(self.allocator, self.accountKey, inner, nonce, dir.keyChange, d.kid);
-        defer self.allocator.free(body);
-
-        var out = try http.query(self.allocator, .{ .url = dir.keyChange, .method = .POST, .body = .{
-            .content = body,
-            .type = .JSON,
-        } });
+        var out = try self.queryWithKID(dir.keyChange, inner);
         defer out.deinit(self.allocator);
 
         if (out.status != 200) {
             log.stdout.printf("failed while making ACME key rollover, failed with status code: {}", .{out.status});
             return error.AccountKeyRolloverFailure;
         }
-
-        try self.storeNonce(&out);
 
         //self.accountKey.deinit();
         self.accountKey = newKey;
@@ -338,26 +312,8 @@ pub const Client = struct {
     };
 
     pub fn updateAccount(self: *Client, r: AccountUpdateRequest) !void {
-        var d = try self.retreiveAccountWithDetails(self.allocator);
-        defer d.deinit(self.allocator);
-
-        const nonce = try self.getNonce();
-        defer self.allocator.free(nonce);
-
-        // TODO: eliminate that step
-        // store null-terminaked kid in Client.
-        const kidZero = try self.allocator.alloc(u8, d.kid.len + 1);
-        defer self.allocator.free(kidZero);
-        std.mem.copy(u8, kidZero, d.kid);
-        kidZero[d.kid.len] = 0;
-
-        var body = try jws.withKID(self.allocator, self.accountKey, r, nonce, d.kid, d.kid);
-        defer self.allocator.free(body);
-
-        var out = try http.query(self.allocator, .{ .url = kidZero[0..d.kid.len :0], .method = .POST, .body = .{
-            .content = body,
-            .type = .JSON,
-        } });
+        const kid = try self.getKID();
+        var out = try self.queryWithKID(kid, r);
         defer out.deinit(self.allocator);
 
         if (out.status != 200) {
@@ -366,6 +322,22 @@ pub const Client = struct {
         }
 
         try self.storeNonce(&out);
+    }
+
+    fn getKID(self: *Client) ![:0]const u8 {
+        if (self.kid) |kid| return kid[0 .. kid.len - 1 :0];
+
+        var d = try self.retreiveAccountWithDetails(self.allocator);
+        defer d.deinit(self.allocator);
+
+        const kidZero = try self.allocator.alloc(u8, d.kid.len + 1);
+        errdefer self.allocator.free(kidZero);
+
+        std.mem.copy(u8, kidZero, d.kid);
+        kidZero[d.kid.len] = 0;
+        self.kid = kidZero;
+
+        return kidZero[0..d.kid.len :0];
     }
 
     fn storeNonce(self: *Client, response: *http.Respose) !void {
