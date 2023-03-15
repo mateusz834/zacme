@@ -278,14 +278,13 @@ pub const Client = struct {
             oldKey: jws.JWK,
         };
 
-        var d = try self.retreiveAccountWithDetails(self.allocator);
-        defer d.deinit(self.allocator);
+        const kid = try self.getKID();
 
         var public = try self.accountKey.getPublicKey(self.allocator);
         defer public.deinit(self.allocator);
 
         var kc = keyChange{
-            .account = d.kid,
+            .account = kid,
             .oldKey = try jws.JWK.fromCryptoPublicKey(self.allocator, public),
         };
         defer kc.oldKey.deinit(self.allocator);
