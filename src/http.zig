@@ -65,7 +65,7 @@ pub const Request = struct {
 
             pub fn contentTypeHeader(self: Type) [:0]const u8 {
                 return switch (self) {
-                    .JSON => "Content-Type: application/json",
+                    .JSON => "Content-Type: application/jose+json",
                 };
             }
         };
@@ -74,11 +74,13 @@ pub const Request = struct {
     pub const Method = enum {
         GET,
         POST,
+        HEAD,
 
         pub fn string(self: Method) [:0]const u8 {
             return switch (self) {
                 .GET => "GET",
                 .POST => "POST",
+                .HEAD => "HEAD",
             };
         }
     };
@@ -229,6 +231,11 @@ fn headerCallbackErr(header: []const u8, usr_data: *headersData) !void {
         var key = header[0..index];
         var value = header[index + 1 ..];
 
+        // TODO: lubcurl appends newlines here for some reason
+        // figure out if this is CRLF of LF.
+        // and a space TODO
+        value = value[1 .. value.len - 2];
+
         var valueAlloc = try allocator.alloc(u8, value.len);
         errdefer allocator.free(valueAlloc);
         std.mem.copy(u8, valueAlloc, value);
@@ -236,10 +243,10 @@ fn headerCallbackErr(header: []const u8, usr_data: *headersData) !void {
         if (usr_data.headers.get(key)) |v| {
             var valueSlice = try allocator.alloc([]const u8, v.len + 1);
             errdefer allocator.free(valueSlice);
-            defer allocator.free(v);
             std.mem.copy([]const u8, valueSlice, v);
             valueSlice[v.len] = valueAlloc;
             try usr_data.headers.put(allocator, usr_data.headers.getKey(key).?, valueSlice);
+            allocator.free(v);
         } else {
             var keyAlloc = try allocator.alloc(u8, key.len);
             errdefer allocator.free(keyAlloc);
