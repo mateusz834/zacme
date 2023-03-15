@@ -18,7 +18,7 @@ pub const Client = struct {
         newAccount: [:0]const u8,
         // TODO: how json parser handles this kind of slices?
         newNonce: [:0]const u8,
-        newOrder: []const u8,
+        newOrder: [:0]const u8,
         revokeCert: []const u8,
         meta: Meta,
 
@@ -162,7 +162,7 @@ pub const Client = struct {
                 const nonce = try self.getNonce();
                 defer self.allocator.free(nonce);
 
-                var body = try jws.withKID(self.allocator, self.accountKey, payload, nonce, kid, url);
+                var body = try jws.withKID(self.allocator, self.accountKey, payload, nonce, url, kid);
                 break :blk body;
             };
             defer self.allocator.free(body);
@@ -465,6 +465,129 @@ pub const Client = struct {
         self.kid = kidZero;
 
         return kidZero[0..d.kid.len :0];
+    }
+
+    pub const CertificateIssuanceRequest = struct {
+        identifiers: []Identifier,
+        notBefore: ?i64 = null,
+        notAfter: ?i64 = null,
+
+        pub const Identifier = struct {
+            type: Type,
+            value: []const u8,
+
+            pub const Type = enum {
+                dns,
+
+                fn string(self: Type) []const u8 {
+                    return switch (self) {
+                        .dns => "dns",
+                    };
+                }
+
+                pub fn jsonStringify(
+                    s: @This(),
+                    options: std.json.StringifyOptions,
+                    out_stream: anytype,
+                ) @TypeOf(out_stream).Error!void {
+                    return std.json.stringify(s.string(), options, out_stream);
+                }
+            };
+        };
+    };
+
+    pub fn issueCertificate(self: *Client, request: CertificateIssuanceRequest) !void {
+        var dir = try self.getDirectory();
+
+        var out = try self.queryWithKID(dir.newOrder, request);
+        defer out.deinit(self.allocator);
+
+        if (out.status != 201) {
+            log.stdout.printf("failed while requesting issuance of a certifiacte, failed with status code: {}", .{out.status});
+            return error.CertIssuanceFailed;
+        }
+
+        const Response = struct {
+            status: Status,
+            authorizations: [][:0]const u8,
+            finalize: []const u8,
+
+            pub const Status = enum { invalid, pending, ready, processsing, valid };
+        };
+
+        var tokens = std.json.TokenStream.init(out.body);
+        const parseOptions = .{ .allocator = self.allocator, .ignore_unknown_fields = true };
+        var res = try std.json.parse(Response, &tokens, parseOptions);
+        defer std.json.parseFree(Response, res, parseOptions);
+        log.stdout.printf("res: {}", .{res});
+
+        for (res.authorizations) |authorization| {
+            var a = try self.getAuthorization(authorization);
+            defer a.deinit(self.allocator);
+            log.stdout.printf("auth: {}", .{a});
+
+            try self.startChallengeValidation(a.challenges[0].url);
+            std.time.sleep(std.time.ns_per_s);
+            try self.startChallengeValidation2(a.challenges[0].url);
+        }
+    }
+
+    const Authorization = struct {
+        status: Status,
+        identifier: CertificateIssuanceRequest.Identifier,
+        challenges: []Challenge,
+        wildcard: bool = false,
+
+        pub const Challenge = struct {
+            type: []const u8,
+            url: [:0]const u8,
+            status: Challenge.Status,
+            token: []const u8,
+
+            pub const Status = enum { pending, processsing, valid, invalid };
+        };
+
+        pub const Status = enum { pending, valid, invalid, deactivated, exipred, revoked };
+
+        pub fn deinit(self: Authorization, allocator: std.mem.Allocator) void {
+            const parseOptions = .{ .allocator = allocator, .ignore_unknown_fields = true };
+            std.json.parseFree(Authorization, self, parseOptions);
+        }
+    };
+
+    fn getAuthorization(self: *Client, authURL: [:0]const u8) !Authorization {
+        var out = try self.queryWithKID(authURL, @as([]const u8, ""));
+        defer out.deinit(self.allocator);
+
+        if (out.status != 200) {
+            log.stdout.printf("failed while retreiving Authorization, failed with status code: {}", .{out.status});
+            return error.AuthorizaionRetrivalFailed;
+        }
+
+        var tokens = std.json.TokenStream.init(out.body);
+        const parseOptions = .{ .allocator = self.allocator, .ignore_unknown_fields = true };
+        var res = try std.json.parse(Authorization, &tokens, parseOptions);
+        return res;
+    }
+
+    fn startChallengeValidation(self: *Client, challengeURL: [:0]const u8) !void {
+        var out = try self.queryWithKID(challengeURL, @as([]const u8, "{}"));
+        defer out.deinit(self.allocator);
+
+        if (out.status != 200) {
+            log.stdout.printf("failed while requesting server to validate challange, failed with status code: {}", .{out.status});
+            return error.StartChallengeValidationFailed;
+        }
+    }
+
+    fn startChallengeValidation2(self: *Client, challengeURL: [:0]const u8) !void {
+        var out = try self.queryWithKID(challengeURL, @as([]const u8, ""));
+        defer out.deinit(self.allocator);
+
+        if (out.status != 200) {
+            log.stdout.printf("failed while requesting server to validate challange, failed with status code: {}", .{out.status});
+            return error.StartChallengeValidationFailed;
+        }
     }
 
     fn getNonce(self: *Client) ![]const u8 {

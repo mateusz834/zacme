@@ -37,6 +37,24 @@ pub fn main() !u8 {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var kk = blk: {
+        var keyPEM = try std.fs.cwd().readFileAlloc(allocator, "key.pem", std.math.maxInt(usize));
+        defer allocator.free(keyPEM);
+        break :blk try crypto.Key.from_pem(allocator, keyPEM);
+    };
+    defer kk.deinit();
+
+    var cc = acme.Client.init(allocator, lencr, kk);
+    defer cc.deinit();
+
+    var idents = [_]acme.Client.CertificateIssuanceRequest.Identifier{
+        .{ .type = .dns, .value = "d-nks.eu.org" },
+    };
+
+    try cc.issueCertificate(.{
+        .identifiers = &idents,
+    });
+
     var c = cmd.Cmd.parseFromArgs(allocator) catch return 1;
     defer c.deinit();
 
