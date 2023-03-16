@@ -44,11 +44,36 @@ fn init() !void {
     if (verbose)
         try setOpt(curl.CURLOPT_VERBOSE, @intCast(c_long, 1));
 
+    // TODO:
+    // RFC 8555 6.1:
+    // ACME clients MUST send a User-Agent header field, in accordance with
+    // [RFC7231].  This header field SHOULD include the name and version of
+    // the ACME software in addition to the name and version of the
+    // underlying HTTP client software.
+
+    // TODO:
+    // RFC 8555 6.1:
+    // ACME clients SHOULD send an Accept-Language header field in
+    // accordance with [RFC7231] to enable localization of error messages.
+
+    // TODO:
+    // RFC 8555 6.1:
+    // ACME servers SHOULD follow the recommendations of [RFC7525] when
+    // configuring their TLS implementations.
+    // TODO: so if servers SHOULD follow this recommendations, we should
+    // (by default) make sure that we are connecting to servers that
+    // fulfill that recomendation, (probably only setting the cipher suites).
+
     try setOpt(curl.CURLOPT_SSLVERSION, curl.CURL_SSLVERSION_TLSv1_2);
     try setOpt(curl.CURLOPT_HEADERFUNCTION, headersCallback);
     try setOpt(curl.CURLOPT_WRITEFUNCTION, writeCallback);
     try setOpt(curl.CURLOPT_ERRORBUFFER, &errBuf[0]);
-    //try setOpt(curl.CURLOPT_PROTOCOLS_STR, "https");
+
+    // RFC 8555 6.1:
+    // Each ACME function is accomplished by the client sending a sequence
+    // of HTTPS requests to the server [RFC2818], carrying JSON messages
+    // [RFC8259].  Use of HTTPS is REQUIRED.
+    try setOpt(curl.CURLOPT_PROTOCOLS_STR, "https");
 }
 
 pub const Request = struct {
@@ -90,6 +115,9 @@ pub const Respose = struct {
     status: u64,
     headers: std.StringHashMapUnmanaged([][]const u8),
     body: []const u8,
+    contentType: ContentType,
+
+    pub const ContentType = enum { JSON, JSONProblem, Unknown };
 
     pub fn deinit(self: *Respose, allocator: std.mem.Allocator) void {
         allocator.free(self.body);
@@ -163,6 +191,24 @@ pub fn query(allocator: std.mem.Allocator, request: Request) !Respose {
         return error.CURLPerformFailed;
     }
 
+    var ct: [*c]const u8 = null;
+    ret = curl.curl_easy_getinfo(handle, curl.CURLINFO_CONTENT_TYPE, &ct);
+    if (ret != curl.CURLE_OK) {
+        log.errf("failed to retreive response content type: {s}", .{curl.curl_easy_strerror(ret)});
+        return error.CURLPerformFailed;
+    }
+
+    var contentType: Respose.ContentType = if (ct != null) blk: {
+        // TODO: (tested) this also includes attributes, handle them somehow (ignore).
+        const c = std.mem.span(ct);
+        break :blk if (std.ascii.eqlIgnoreCase(c, "application/json"))
+            .JSON
+        else if (std.ascii.eqlIgnoreCase(c, "application/problem+json"))
+            .JSONProblem
+        else
+            .Unknown;
+    } else .Unknown;
+
     if (verbose) {
         log.stderr.printf("{s}", .{data.list.items});
     }
@@ -171,6 +217,7 @@ pub fn query(allocator: std.mem.Allocator, request: Request) !Respose {
         .status = @intCast(u64, code),
         .headers = hData.headers,
         .body = try data.list.toOwnedSlice(),
+        .contentType = contentType,
     };
 }
 

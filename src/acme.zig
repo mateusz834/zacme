@@ -44,58 +44,189 @@ pub const Client = struct {
         if (self.kid) |kid| self.allocator.free(kid);
     }
 
-    fn printErrorDetails(self: *Client, body: []const u8) !void {
+    const AcmeError = error{
+        BadNonce,
+    };
+
+    fn handleACMEErrors(self: *Client, comptime notReportErr: ?AcmeError, response: *http.Respose) !void {
+        // RFC 8555 6.7:
+        // ACME servers can return
+        // responses with an HTTP error response code (4XX or 5XX).
+        // When the server responds with an error status, it SHOULD provide
+        // additional information using a problem document [RFC7807].
+        if (!(response.status >= 400 and response.status <= 599 and response.contentType == .JSONProblem)) return;
+
         const Result = struct {
             type: []const u8,
-            detail: ?[]const u8,
+            detail: ?[]const u8 = null,
+            algorithms: ?[][]const u8 = null,
+            subproblems: ?[]Subproblem = null,
+
+            pub const Subproblem = struct {
+                type: []const u8,
+                detail: ?[]const u8 = null,
+                identifier: ?Identifier = null,
+
+                pub const Identifier = struct {
+                    type: []const u8,
+                    value: []const u8,
+                };
+            };
+
+            pub fn printSubproblems(s: *@This()) void {
+                if (s.subproblems) |subproblems| for (subproblems) |subproblem| {
+                    if (subproblem.detail == null) {
+                        if (subproblem.identifier) |identifier| {
+                            log.stderr.printf("subproblem: {s}, identifer: type: {s}, value: {s}", .{ subproblem.type, identifier.type, identifier.value });
+                            return;
+                        }
+                        log.stderr.printf("subproblem: {s}", .{subproblem.type});
+                    } else {
+                        if (subproblem.identifier) |identifier| {
+                            log.stderr.printf("subproblem: {s}: {s}, identifer: type: {s}, value: {s}", .{ subproblem.type, subproblem.detail.?, identifier.type, identifier.value });
+                            return;
+                        }
+                        log.stderr.printf("subproblem: {s}: {s}", .{ subproblem.type, subproblem.detail.? });
+                    }
+                };
+            }
         };
 
         const parseOptions = .{ .allocator = self.allocator, .ignore_unknown_fields = true };
-        var tokens = std.json.TokenStream.init(body);
+        var tokens = std.json.TokenStream.init(response.body);
         var resErr = try std.json.parse(Result, &tokens, parseOptions);
         defer std.json.parseFree(Result, resErr, parseOptions);
 
+        const AcmeURNPrefix = "urn:ietf:params:acme:error:";
+
+        // RFC 8555 6.5:
+        // When a server rejects a request because its nonce value was
+        // unacceptable (or not present), it MUST provide HTTP status code 400
+        // (Bad Request), and indicate the ACME error type
+        // "urn:ietf:params:acme:error:badNonce"
+        if (response.status == 400) {
+            if (notReportErr) |e| {
+                if (std.mem.startsWith(u8, resErr.type, AcmeURNPrefix)) {
+                    const err = resErr.type[AcmeURNPrefix.len..];
+                    if (e == AcmeError.BadNonce and std.mem.eql(u8, err, "badNonce")) {
+                        return AcmeError.BadNonce;
+                    }
+                }
+            }
+        }
+
+        // RFC 8555 6.2:
+        // If the client sends a JWS signed with an algorithm that the server
+        // does not support, then the server MUST return an error with status
+        // code 400 (Bad Request) and type
+        // "urn:ietf:params:acme:error:badSignatureAlgorithm".  The problem
+        // document returned with the error MUST include an "algorithms" field
+        // with an array of supported "alg" values.
+        if (response.status == 400) {
+            if (std.mem.startsWith(u8, resErr.type, AcmeURNPrefix)) {
+                const err = resErr.type[AcmeURNPrefix.len..];
+                if (std.mem.eql(u8, err, "badSignatureAlgorithm")) {
+                    if (resErr.detail == null) {
+                        log.stderr.printf("acme error: {s}, supported signature algorithms: {?s}", .{ resErr.type, resErr.algorithms });
+                    } else {
+                        log.stderr.printf("acme error: {s}: {s}, supported signature algorithms: {?s}", .{ resErr.type, resErr.detail.?, resErr.algorithms });
+                    }
+
+                    resErr.printSubproblems();
+                    return error.UnknownAcmeError;
+                }
+            }
+        }
+
         if (resErr.detail == null) {
-            log.stderr.printf("caused by: {s}", .{resErr.type});
+            log.stderr.printf("acme error: {s}", .{resErr.type});
         } else {
-            log.stderr.printf("caused by: {s}: {s}", .{ resErr.type, resErr.detail.? });
+            log.stderr.printf("acme error: {s}: {s}", .{ resErr.type, resErr.detail.? });
+        }
+
+        resErr.printSubproblems();
+        return error.UnknownAcmeError;
+    }
+
+    fn postQuery(self: *Client, url: [:0]const u8, comptime withJwk: bool, payload: anytype) !http.Respose {
+        while (true) {
+            var body = if (withJwk) blk: {
+                const nonce = try self.getNonce();
+                defer self.allocator.free(nonce);
+
+                var body = try jws.withJWK(self.allocator, self.accountKey, payload, nonce, url);
+                break :blk body;
+            } else blk: {
+                const kid = try self.getKID();
+
+                const nonce = try self.getNonce();
+                defer self.allocator.free(nonce);
+
+                var body = try jws.withKID(self.allocator, self.accountKey, payload, nonce, kid, url);
+                break :blk body;
+            };
+            defer self.allocator.free(body);
+
+            // TODO: handle RFC 8555 6.6.  Rate Limits
+            var out = try http.query(self.allocator, .{ .url = url, .method = .POST, .body = .{
+                .content = body,
+                .type = .JSON,
+            } });
+            errdefer out.deinit(self.allocator);
+
+            // RFC 8555 6.3:
+            // The server MUST include
+            // a Replay-Nonce header field in every successful response to a POST
+            // request and SHOULD provide it in error responses as well.
+            try self.storeNonce(&out);
+
+            self.handleACMEErrors(AcmeError.BadNonce, &out) catch |err| switch (err) {
+                AcmeError.BadNonce => {
+                    // RFC 8555 6.5: An error response with the
+                    // "badNonce" error type MUST include a Replay-Nonce header field with a
+                    // fresh nonce that the server will accept in a retry of the original
+                    // query (and possibly in other requests, according to the server's
+                    // nonce scoping policy).  On receiving such a response, a client SHOULD
+                    // retry the request using the new nonce.
+
+                    // The new nonce was stored by storeNonce (above), so retry the query.
+                    out.deinit(self.allocator);
+                    continue;
+                },
+                else => return err,
+            };
+
+            return out;
+        }
+    }
+
+    fn storeNonce(self: *Client, response: *http.Respose) !void {
+        if (self.nonce == null) {
+            var nonces = response.headers.get("replay-nonce");
+            if (nonces == null or nonces.?.len != 1) {
+                return;
+            }
+
+            // TODO:
+            // RFC 8555 6.5.1:
+            // The value of the Replay-Nonce header field MUST be an octet string
+            // encoded according to the base64url
+            // Clients MUST ignore invalid Replay-Nonce values.
+            // TODO: but also ignore them in the newNonce endpoint??
+
+            // TODO: validate characters in this nonce.
+            var nonce = try self.allocator.alloc(u8, nonces.?[0].len);
+            std.mem.copy(u8, nonce, nonces.?[0]);
+            self.nonce = nonce;
         }
     }
 
     fn queryWithJWK(self: *Client, url: [:0]const u8, payload: anytype) !http.Respose {
-        const nonce = try self.getNonce();
-        defer self.allocator.free(nonce);
-
-        var body = try jws.withJWK(self.allocator, self.accountKey, payload, nonce, url);
-        defer self.allocator.free(body);
-
-        var out = try http.query(self.allocator, .{ .url = url, .method = .POST, .body = .{
-            .content = body,
-            .type = .JSON,
-        } });
-        errdefer out.deinit(self.allocator);
-
-        try self.storeNonce(&out);
-        return out;
+        return self.postQuery(url, true, payload);
     }
 
     fn queryWithKID(self: *Client, url: [:0]const u8, payload: anytype) !http.Respose {
-        const kid = try self.getKID();
-
-        const nonce = try self.getNonce();
-        defer self.allocator.free(nonce);
-
-        var body = try jws.withKID(self.allocator, self.accountKey, payload, nonce, kid, url);
-        defer self.allocator.free(body);
-
-        var out = try http.query(self.allocator, .{ .url = url, .method = .POST, .body = .{
-            .content = body,
-            .type = .JSON,
-        } });
-        errdefer out.deinit(self.allocator);
-
-        try self.storeNonce(&out);
-        return out;
+        return self.postQuery(url, false, payload);
     }
 
     pub fn retreiveAccount(self: *Client) !void {
@@ -173,7 +304,6 @@ pub const Client = struct {
 
         if (out.status != 200) {
             log.stdout.printf("failed while creating account, failed with status code: {}", .{out.status});
-            try self.printErrorDetails(out.body);
             return error.AccountCreationFailure;
         }
 
@@ -337,24 +467,30 @@ pub const Client = struct {
         return kidZero[0..d.kid.len :0];
     }
 
-    fn storeNonce(self: *Client, response: *http.Respose) !void {
-        if (self.nonce == null) {
-            var nonces = response.headers.get("replay-nonce");
-            if (nonces == null or nonces.?.len != 1) {
-                return;
-            }
-            // TODO: validate characters in this nonce.
-            var nonce = try self.allocator.alloc(u8, nonces.?[0].len);
-            std.mem.copy(u8, nonce, nonces.?[0]);
-            self.nonce = nonce;
-        }
-    }
-
     fn getNonce(self: *Client) ![]const u8 {
         if (self.nonce != null) {
             defer self.nonce = null;
             return self.nonce.?;
         }
+
+        // TODO: So maybe we shouldn't use the newNonce endpoint and use the badNonce
+        // for receiving them??
+        // Other than the constraint above with regard to nonces issued in
+        // "badNonce" responses, ACME does not constrain how servers scope
+        // nonces.  Clients MAY assume that nonces have broad scope, e.g., by
+        // having a single pool of nonces used for all requests.  However, when
+        // retrying in response to a "badNonce" error, the client MUST use the
+        // nonce provided in the error response.  Servers should scope nonces
+        // broadly enough that retries are not needed very often.
+
+        // TODO: what is the use-case for POST-as-GET to thease resources?
+        // TODO: should getNonce use POST-as-GET for newNonce requests after retreiveAccount??
+        // TODO: POST-as-GET gives us Request URL Integrity (6.4) for newNonce. (is this useful?)
+        // RFC 8555 6.3:
+        // The server MUST allow GET requests for the directory and newNonce
+        // resources (see Section 7.1), in addition to POST-as-GET requests for
+        // these resources.  This enables clients to bootstrap into the ACME
+        // authentication system.
 
         var directory = try self.getDirectory();
         log.stdout.printf("fetching ACME nonce from: \"{s}\"", .{directory.newNonce});
