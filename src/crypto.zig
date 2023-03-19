@@ -13,6 +13,63 @@ const openssl = @cImport({
 const std = @import("std");
 const log = @import("./log.zig");
 
+pub const StreamingSha256 = struct {
+    md_ctx: *openssl.EVP_MD_CTX,
+
+    pub fn init() !StreamingSha256 {
+        var md_ctx = openssl.EVP_MD_CTX_new() orelse return error.OutOfMemory;
+        errdefer openssl.EVP_MD_CTX_free(md_ctx);
+
+        if (openssl.EVP_DigestInit(md_ctx, openssl.EVP_sha256()) != 1)
+            return error.DigestInitFailure;
+
+        return .{ .md_ctx = md_ctx };
+    }
+
+    pub fn deinit(self: StreamingSha256) void {
+        openssl.EVP_MD_CTX_free(self.md_ctx);
+    }
+
+    pub fn writer(self: StreamingSha256) std.io.Writer(StreamingSha256, error{DigestUpdateFailure}, write) {
+        return .{ .context = self };
+    }
+
+    fn write(context: StreamingSha256, bytes: []const u8) error{DigestUpdateFailure}!usize {
+        if (openssl.EVP_DigestUpdate(context.md_ctx, &bytes[0], bytes.len) != 1)
+            return error.DigestUpdateFailure;
+        return bytes.len;
+    }
+
+    pub const digestLength = std.crypto.hash.sha2.Sha256.digest_length;
+    pub fn final(self: StreamingSha256) ![digestLength]u8 {
+        var md_value: [openssl.EVP_MAX_MD_SIZE]u8 = undefined;
+        var len: c_uint = 0;
+
+        if (openssl.EVP_DigestFinal(self.md_ctx, &md_value[0], &len) != 1)
+            return error.DigestFinalFailure;
+
+        if (len != digestLength) @panic("openssl internal error, sha256 returned invalid digest length");
+        return md_value[0..digestLength].*;
+    }
+};
+
+test "StreamingSha256" {
+    var zigCrypto = std.crypto.hash.sha2.Sha256.init(.{});
+    var sha256 = try StreamingSha256.init();
+    defer sha256.deinit();
+
+    for (1..100) |i| {
+        try sha256.writer().writeByte(@intCast(u8, i));
+        try zigCrypto.writer().writeByte(@intCast(u8, i));
+    }
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &zigCrypto.finalResult(),
+        &try sha256.final(),
+    );
+}
+
 pub const Key = struct {
     type: Type,
     pkey: ?*openssl.EVP_PKEY,
