@@ -90,6 +90,52 @@ pub const JWK = union(enum) {
     }
 };
 
+// This test proves that the std.json.stringify procuces a valid JWK for use for JWK Thumbprint.
+// It must not contain amy spaces and the fields must be in specifed order.
+
+// RFC 7638 3: Construct a JSON object [RFC7159] containing only the required
+// members of a JWK representing the key and with no whitespace or
+// line breaks before or after any syntactic elements and with the
+// required members ordered lexicographically by the Unicode
+// [UNICODE] code points of the member names.  (This JSON object is
+// itself a legal JWK representation of the key.)
+//
+// RFC 7638 3.3: The required members in the input to the hash function are ordered
+// lexicographically by the Unicode code points of the member names.
+test "JWK valid for JWK Tumbprint" {
+    const testValue1 = "test1";
+    const testValue2 = "test2";
+    const b64TestValue1 = try encodeBase64(std.testing.allocator, testValue1);
+    defer std.testing.allocator.free(b64TestValue1);
+    const b64TestValue2 = try encodeBase64(std.testing.allocator, testValue2);
+    defer std.testing.allocator.free(b64TestValue2);
+
+    var jwkRSA = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .RSA = .{ .E = testValue1, .N = testValue2 } });
+    defer jwkRSA.deinit(std.testing.allocator);
+    var jwkECDSA = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .ECDSA = .{ .Curve = crypto.Key.Type.Curve.P384, .X = testValue1, .Y = testValue2 } });
+    defer jwkECDSA.deinit(std.testing.allocator);
+
+    var rsa = std.ArrayList(u8).init(std.testing.allocator);
+    defer rsa.deinit();
+    try jwkRSA.jsonStringify(.{}, rsa.writer());
+
+    var ecdsa = std.ArrayList(u8).init(std.testing.allocator);
+    defer ecdsa.deinit();
+    try jwkECDSA.jsonStringify(.{}, ecdsa.writer());
+
+    try std.testing.expectFmt(
+        rsa.items,
+        "{s}\"e\":\"{s}\",\"kty\":\"{s}\",\"n\":\"{s}\"{s}",
+        .{ "{", b64TestValue1, "RSA", b64TestValue2, "}" },
+    );
+
+    try std.testing.expectFmt(
+        ecdsa.items,
+        "{s}\"crv\":\"{s}\",\"kty\":\"{s}\",\"x\":\"{s}\",\"y\":\"{s}\"{s}",
+        .{ "{", "P-384", "EC", b64TestValue1, b64TestValue2, "}" },
+    );
+}
+
 const headers = struct {
     alg: []const u8,
     nonce: ?[]const u8,
