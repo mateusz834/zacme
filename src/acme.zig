@@ -590,6 +590,53 @@ pub const Client = struct {
         }
     }
 
+    // keyAuthToWriter writes the RFC 8555 8.1 Key Authorizations to the writer.
+    fn keyAuthToWriter(self: *Client, token: []const u8, writer: anytype) !void {
+        var public = try self.accountKey.getPublicKey(self.allocator);
+        defer public.deinit(self.allocator);
+
+        const jwk = try jws.JWK.fromCryptoPublicKey(self.allocator, public);
+        defer jwk.deinit(self.allocator);
+
+        var sha256 = try crypto.StreamingSha256.init();
+        defer sha256.deinit();
+
+        try std.json.stringify(jwk, .{}, sha256.writer());
+
+        const thumbprint = try sha256.final();
+
+        const base64ThumbprintLen = comptime std.base64.url_safe_no_pad.Encoder.calcSize(crypto.StreamingSha256.digestLength);
+        var base64Thumbprint: [base64ThumbprintLen]u8 = undefined;
+
+        try writer.writeAll(token);
+        try writer.writeByte('.');
+        try writer.writeAll(std.base64.url_safe_no_pad.Encoder.encode(&base64Thumbprint, &thumbprint));
+    }
+
+    fn keyAuth(self: *Client, token: []const u8) ![]const u8 {
+        const base64ThumbprintLen = comptime std.base64.url_safe_no_pad.Encoder.calcSize(crypto.StreamingSha256.digestLength);
+        var keyauth = try std.ArrayList(u8).initCapacity(self.allocator, token.len + 1 + base64ThumbprintLen);
+        errdefer keyauth.deinit();
+        try self.keyAuthToWriter(token, keyauth.writer());
+        return keyauth.toOwnedSlice();
+    }
+
+    const DNS01ResourceRecordLength = std.base64.url_safe_no_pad.Encoder.calcSize(crypto.StreamingSha256.digestLength);
+    fn DNS01ChallengeRecord(self: *Client, token: []const u8) ![DNS01ResourceRecordLength]u8 {
+        var sha256 = try crypto.StreamingSha256.init();
+        defer sha256.deinit();
+        try self.keyAuthToWriter(token, sha256.writer());
+        const digest = try sha256.final();
+
+        var outBase64: [DNS01ResourceRecordLength]u8 = undefined;
+        _ = std.base64.url_safe_no_pad.Encoder.encode(&outBase64, &digest);
+        return outBase64;
+    }
+
+    fn HTTP01ChallengeResponse(self: *Client, token: []const u8) ![]const u8 {
+        return self.keyAuth(token);
+    }
+
     fn getNonce(self: *Client) ![]const u8 {
         if (self.nonce != null) {
             defer self.nonce = null;
