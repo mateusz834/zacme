@@ -7,11 +7,51 @@ const openssl = @cImport({
     @cInclude("openssl/err.h");
     @cInclude("openssl/objects.h");
     @cInclude("openssl/core_names.h");
+    @cInclude("openssl/asn1t.h");
     @cInclude("openssl.h");
 });
 
 const std = @import("std");
 const log = @import("./log.zig");
+
+// buildCSR builds a DER-encoded x509 CSR.
+pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8) ![]const u8 {
+    var builder = openssl.X509_REQ_new() orelse return error.NewReqFailure;
+    defer openssl.X509_REQ_free(builder);
+
+    var name = openssl.X509_NAME_new() orelse return error.NewNameFailure;
+    defer openssl.X509_NAME_free(name);
+
+    const ret = openssl.X509_NAME_add_entry_by_txt(name, "CN", openssl.MBSTRING_UTF8, cn.ptr, @intCast(c_int, cn.len), -1, 0);
+    if (ret <= 0) return error.NameAddEntryFailure;
+
+    if (openssl.X509_REQ_set_subject_name(builder, name) <= 0) return error.SetSubjectFailed;
+
+    if (openssl.X509_REQ_set_pubkey(builder, key.pkey) <= 0) return error.SetPubKeyFailure;
+
+    // TODO: figure out the signature algorithm, always sha256??
+    if (openssl.X509_REQ_sign(builder, key.pkey, openssl.EVP_sha256()) <= 0) return error.SignFailure;
+
+    const length = openssl.i2d_X509_REQ(builder, null);
+    if (length <= 0) return error.i2dX509ReqFailure;
+
+    var buf = try allocator.alloc(u8, @intCast(usize, length));
+    errdefer allocator.free(buf);
+
+    var dataPtr: [1][*c]u8 = [1][*]u8{buf.ptr};
+    var dataPtr2: [*c][*c]u8 = dataPtr[0..];
+    var res = openssl.i2d_X509_REQ(builder, dataPtr2);
+    if (res <= 0) return error.i2dX509ReqFailure;
+    return buf;
+}
+
+test "buildCSR" {
+    var key = try Key.generate(.{ .ECDSA = .P256 });
+    defer key.deinit();
+    var csr = try buildCSR(std.testing.allocator, &key, "example.com");
+    defer std.testing.allocator.free(csr);
+    try std.fs.cwd().writeFile("csr.der", csr);
+}
 
 pub const StreamingSha256 = struct {
     md_ctx: *openssl.EVP_MD_CTX,
