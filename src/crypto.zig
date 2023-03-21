@@ -15,7 +15,7 @@ const std = @import("std");
 const log = @import("./log.zig");
 
 // buildCSR builds a DER-encoded x509 CSR.
-pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8) ![]const u8 {
+pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dnsSAN: [][]const u8) ![]const u8 {
     var builder = openssl.X509_REQ_new() orelse return error.NewReqFailure;
     defer openssl.X509_REQ_free(builder);
 
@@ -26,6 +26,23 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8) ![]cons
     if (ret <= 0) return error.NameAddEntryFailure;
 
     if (openssl.X509_REQ_set_subject_name(builder, name) <= 0) return error.SetSubjectFailed;
+
+    var sans = std.ArrayList(u8).init(allocator);
+    defer sans.deinit();
+
+    for (dnsSAN, 0..) |san, i| {
+        if (i == 0) {
+            try sans.writer().print("DNS:{s}", .{san});
+        } else {
+            try sans.writer().print(",DNS:{s}", .{san});
+        }
+    }
+
+    if (sans.items.len != 0) {
+        try sans.append(0);
+        // Using a wrapper defined in openssl.c, because of a translate-c.
+        if (openssl.add_SANs(builder, sans.items.ptr) <= 0) return error.SanAddFailure;
+    }
 
     if (openssl.X509_REQ_set_pubkey(builder, key.pkey) <= 0) return error.SetPubKeyFailure;
 
@@ -48,9 +65,9 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8) ![]cons
 test "buildCSR" {
     var key = try Key.generate(.{ .ECDSA = .P256 });
     defer key.deinit();
-    var csr = try buildCSR(std.testing.allocator, &key, "example.com");
+    var sans = [_][]const u8{ "example.com", "www.example.com" };
+    var csr = try buildCSR(std.testing.allocator, &key, "example.com", &sans);
     defer std.testing.allocator.free(csr);
-    try std.fs.cwd().writeFile("csr.der", csr);
 }
 
 pub const StreamingSha256 = struct {
