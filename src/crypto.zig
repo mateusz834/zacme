@@ -13,57 +13,239 @@ const openssl = @cImport({
 
 const std = @import("std");
 const log = @import("./log.zig");
+const builtin = @import("builtin");
 
-// buildCSR builds a DER-encoded x509 CSR.
-pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dnsSAN: [][]const u8) ![]const u8 {
-    var builder = openssl.X509_REQ_new() orelse return error.NewReqFailure;
-    defer openssl.X509_REQ_free(builder);
+const der = std.crypto.Certificate.der;
 
-    var name = openssl.X509_NAME_new() orelse return error.NewNameFailure;
-    defer openssl.X509_NAME_free(name);
+const derBuilder = struct {
+    list: std.ArrayList(u8),
+    depth: if (builtin.mode == .Debug) usize else u0 = 0,
 
-    const ret = openssl.X509_NAME_add_entry_by_txt(name, "CN", openssl.MBSTRING_UTF8, cn.ptr, @intCast(c_int, cn.len), -1, 0);
-    if (ret <= 0) return error.NameAddEntryFailure;
+    pub const Prefixed = struct {
+        startLen: usize,
+    };
 
-    if (openssl.X509_REQ_set_subject_name(builder, name) <= 0) return error.SetSubjectFailed;
+    pub fn newPrefixed(self: *derBuilder, tag: u8) !Prefixed {
+        if (builtin.mode == .Debug) self.depth += 1;
 
-    var sans = std.ArrayList(u8).init(allocator);
-    defer sans.deinit();
+        try self.list.appendSlice(&[_]u8{ tag, 0 });
+        return .{ .startLen = self.list.items.len };
+    }
 
-    for (dnsSAN, 0..) |san, i| {
-        if (i == 0) {
-            try sans.writer().print("DNS:{s}", .{san});
+    pub fn endPrefixed(self: *derBuilder, p: Prefixed) !void {
+        if (builtin.mode == .Debug) self.depth -= 1;
+
+        const endLen = self.list.items.len;
+        var len = endLen - p.startLen;
+        if (len < 0b10000000) {
+            self.list.items[p.startLen - 1] = @intCast(u8, len);
         } else {
-            try sans.writer().print(",DNS:{s}", .{san});
+            var lenBytes: u8 = if (len > std.math.maxInt(u24)) @panic("value too big") else if (len > std.math.maxInt(u16)) 3 else if (len > std.math.maxInt(u8)) 2 else 1;
+            try self.list.appendNTimes(undefined, lenBytes);
+            std.mem.copyBackwards(u8, self.list.items[p.startLen + lenBytes ..], self.list.items[p.startLen..endLen]);
+
+            self.list.items[p.startLen - 1] = 0b10000000 | lenBytes;
+
+            var len_bytes = self.list.items[p.startLen .. p.startLen + lenBytes];
+            var i: isize = @intCast(isize, len_bytes.len) - 1;
+            while (i >= 0) {
+                len_bytes[@intCast(usize, i)] = @truncate(u8, len);
+                len >>= 8;
+                i -= 1;
+            }
         }
     }
 
-    if (sans.items.len != 0) {
-        try sans.append(0);
-        // Using a wrapper defined in openssl.c, because of a translate-c.
-        if (openssl.add_SANs(builder, sans.items.ptr) <= 0) return error.SanAddFailure;
+    pub fn deinit(self: *derBuilder) void {
+        if (builtin.mode == .Debug and self.depth != 0) @panic("deinit() called on derBuilder when depth != 0");
+        self.list.deinit();
+    }
+};
+
+test "der builder small length" {
+    var builder = derBuilder{ .list = std.ArrayList(u8).init(std.testing.allocator) };
+    defer builder.deinit();
+
+    var prefixed = try builder.newPrefixed(10);
+    try builder.list.append(1);
+    try builder.list.append(1);
+    try builder.list.append(1);
+
+    var prefixed2 = try builder.newPrefixed(12);
+    try builder.list.append(1);
+    try builder.endPrefixed(prefixed2);
+
+    try builder.endPrefixed(prefixed);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 10, 6, 1, 1, 1, 12, 1, 1 }, builder.list.items);
+}
+
+test "der builder big length" {
+    var builder = derBuilder{ .list = std.ArrayList(u8).init(std.testing.allocator) };
+    defer builder.deinit();
+
+    var content = "aa" ** 120;
+
+    var prefixed = try builder.newPrefixed(10);
+    try builder.list.appendSlice(content);
+    try builder.list.appendSlice(content);
+
+    var prefixed2 = try builder.newPrefixed(12);
+    try builder.list.appendSlice(content);
+    try builder.endPrefixed(prefixed2);
+
+    try builder.endPrefixed(prefixed);
+
+    var expect = [_]u8{ 10, 0b10000010, 0x02, 0xD3 } ++ content ++ content ++ [_]u8{ 12, 0b10000001, 240 } ++ content;
+
+    try std.testing.expectEqualSlices(u8, expect, builder.list.items);
+}
+
+// buildCSR builds a DER-encoded CSR as defined in RFC 2986.
+pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, _: [][]const u8) ![]const u8 {
+    var public = try key.getPublicKey(allocator);
+    defer public.deinit(allocator);
+
+    var builder = derBuilder{ .list = std.ArrayList(u8).init(allocator) };
+    defer builder.deinit();
+
+    const sequence: u8 = 0x30;
+    const set: u8 = 0x31;
+    const oid: u8 = 0x06;
+    const utf8string: u8 = 0x0C;
+    const bitstring: u8 = 0x03;
+    const null_tag: u8 = 0x05;
+    const integer = 0x02;
+
+    var certifcateRequest = try builder.newPrefixed(sequence);
+    {
+        var certifcateRequestInfo = try builder.newPrefixed(sequence);
+        {
+            // version:
+            try builder.list.append(2); // Tag (Integer)
+            try builder.list.append(1); // Length
+            try builder.list.append(0);
+
+            // subject:
+            var rdn_sequence = try builder.newPrefixed(sequence);
+            var relative_distinguished_name = try builder.newPrefixed(set);
+            var attribute_type_and_value = try builder.newPrefixed(sequence);
+            {
+                // Type: OID: 2.5.4.3 (commonName).
+                const common_name_OID = [_]u8{ 85, 4, 3 };
+                try builder.list.append(oid);
+                try builder.list.append(@intCast(u8, common_name_OID.len));
+                try builder.list.appendSlice(&common_name_OID);
+
+                // Value:
+                // TODO: cn len limit (64)??/
+                try builder.list.append(utf8string);
+                try builder.list.append(@intCast(u8, cn.len));
+                try builder.list.appendSlice(cn);
+            }
+            try builder.endPrefixed(attribute_type_and_value);
+            try builder.endPrefixed(relative_distinguished_name);
+            try builder.endPrefixed(rdn_sequence);
+
+            // subjectPKInfo:
+            var subject_public_key_info = try builder.newPrefixed(sequence);
+            {
+                // Algorithm identifier:
+                var algorithm_identifer = try builder.newPrefixed(sequence);
+                switch (public) {
+                    .RSA => {
+                        // Algorithm OID:
+                        const rsa_OID = [_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01 };
+                        try builder.list.append(oid);
+                        try builder.list.append(@intCast(u8, rsa_OID.len));
+                        try builder.list.appendSlice(&rsa_OID);
+
+                        // Algorithm parameters (RSA requires NULL):
+                        try builder.list.append(null_tag);
+                        try builder.list.append(0);
+                    },
+                    .ECDSA => {
+                        unreachable;
+                    },
+                }
+                try builder.endPrefixed(algorithm_identifer);
+
+                // Public key:
+                var public_key = try builder.newPrefixed(bitstring);
+                try builder.list.append(0); // Number of unused bits prefix.
+                {
+                    switch (public) {
+                        .RSA => |rsa| {
+                            var rsabuilder = derBuilder{ .list = std.ArrayList(u8).init(allocator) };
+                            defer rsabuilder.deinit();
+
+                            var rsa_sequence = try rsabuilder.newPrefixed(sequence);
+                            {
+                                // modulus:
+                                var modulus = try rsabuilder.newPrefixed(integer);
+                                // TODO: remove leading zeros for DER requirement??
+                                try rsabuilder.list.appendSlice(rsa.N);
+                                try rsabuilder.endPrefixed(modulus);
+
+                                // exponent:
+                                var exponent = try rsabuilder.newPrefixed(integer);
+                                try rsabuilder.list.appendSlice(rsa.E);
+                                try rsabuilder.endPrefixed(exponent);
+                            }
+                            try rsabuilder.endPrefixed(rsa_sequence);
+
+                            try builder.list.appendSlice(rsabuilder.list.items);
+                        },
+                        .ECDSA => {
+                            unreachable;
+                        },
+                    }
+                }
+                try builder.endPrefixed(public_key);
+            }
+            try builder.endPrefixed(subject_public_key_info);
+        }
+        try builder.endPrefixed(certifcateRequestInfo);
     }
 
-    if (openssl.X509_REQ_set_pubkey(builder, key.pkey) <= 0) return error.SetPubKeyFailure;
+    var certification_request_info_bytes = builder.list.items[certifcateRequest.startLen..];
+    var signature = try key.sign(allocator, certification_request_info_bytes);
+    defer allocator.free(signature);
 
-    // TODO: figure out the signature algorithm, always sha256??
-    if (openssl.X509_REQ_sign(builder, key.pkey, openssl.EVP_sha256()) <= 0) return error.SignFailure;
+    var algorithm_identifier = try builder.newPrefixed(sequence);
+    {
+        switch (public) {
+            .RSA => {
+                const sha256WithRSA_OID = [_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B };
+                try builder.list.append(oid);
+                try builder.list.append(@intCast(u8, sha256WithRSA_OID.len));
+                try builder.list.appendSlice(&sha256WithRSA_OID);
 
-    const length = openssl.i2d_X509_REQ(builder, null);
-    if (length <= 0) return error.i2dX509ReqFailure;
+                // Algorithm parameters (RSA requires NULL):
+                try builder.list.append(null_tag);
+                try builder.list.append(0);
+            },
+            .ECDSA => {
+                unreachable;
+            },
+        }
+    }
+    try builder.endPrefixed(algorithm_identifier);
 
-    var buf = try allocator.alloc(u8, @intCast(usize, length));
-    errdefer allocator.free(buf);
+    var signature_bitstring = try builder.newPrefixed(bitstring);
+    {
+        try builder.list.append(0); // Number of unused bits prefix.
+        try builder.list.appendSlice(signature);
+    }
+    try builder.endPrefixed(signature_bitstring);
 
-    var dataPtr: [1][*c]u8 = [1][*]u8{buf.ptr};
-    var dataPtr2: [*c][*c]u8 = dataPtr[0..];
-    var res = openssl.i2d_X509_REQ(builder, dataPtr2);
-    if (res <= 0) return error.i2dX509ReqFailure;
-    return buf;
+    try builder.endPrefixed(certifcateRequest);
+
+    return builder.list.toOwnedSlice();
 }
 
 test "buildCSR" {
-    var key = try Key.generate(.{ .ECDSA = .P256 });
+    var key = try Key.generate(.{ .RSA = 2048 });
     defer key.deinit();
     var sans = [_][]const u8{ "example.com", "www.example.com" };
     var csr = try buildCSR(std.testing.allocator, &key, "example.com", &sans);
