@@ -102,12 +102,17 @@ test "der builder big length" {
 }
 
 // buildCSR builds a DER-encoded CSR as defined in RFC 2986.
-pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, _: [][]const u8) ![]const u8 {
+pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_sans: ?[][]const u8) ![]const u8 {
+    // CommonName has a size limit (1..64) (RFC 5280).
+    if (cn.len < 1) return error.CommonNameTooShort;
+    if (cn.len > 64) return error.CommonNameTooLong;
+
     var public = try key.getPublicKey(allocator);
     defer public.deinit(allocator);
 
     var builder = derBuilder{ .list = std.ArrayList(u8).init(allocator) };
     defer builder.deinit();
+    errdefer builder.depth = 0;
 
     const sequence: u8 = 0x30;
     const set: u8 = 0x31;
@@ -115,15 +120,16 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, _: [][]
     const utf8string: u8 = 0x0C;
     const bitstring: u8 = 0x03;
     const null_tag: u8 = 0x05;
-    const integer = 0x02;
+    const integer: u8 = 0x02;
+    const octetstring: u8 = 0x04;
 
     var certifcateRequest = try builder.newPrefixed(sequence);
     {
         var certifcateRequestInfo = try builder.newPrefixed(sequence);
         {
             // version:
-            try builder.list.append(2); // Tag (Integer)
-            try builder.list.append(1); // Length
+            try builder.list.append(integer);
+            try builder.list.append(1);
             try builder.list.append(0);
 
             // subject:
@@ -138,7 +144,7 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, _: [][]
                 try builder.list.appendSlice(&common_name_OID);
 
                 // Value:
-                // TODO: cn len limit (64)??/
+                // TODO: printableString? think about it.
                 try builder.list.append(utf8string);
                 try builder.list.append(@intCast(u8, cn.len));
                 try builder.list.appendSlice(cn);
@@ -176,6 +182,7 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, _: [][]
                 {
                     switch (public) {
                         .RSA => |rsa| {
+                            // TODO: do this without an additional builder (like with extensions).
                             var rsabuilder = derBuilder{ .list = std.ArrayList(u8).init(allocator) };
                             defer rsabuilder.deinit();
 
@@ -204,6 +211,83 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, _: [][]
                 try builder.endPrefixed(public_key);
             }
             try builder.endPrefixed(subject_public_key_info);
+
+            if (dns_sans != null) {
+                // Attributes:
+                // Context-specific class + constructed bit.
+                const attributes_tag: u8 = 0b10100000;
+                var attributes = try builder.newPrefixed(attributes_tag);
+                var attribute = try builder.newPrefixed(sequence);
+                {
+                    // Attribute type:
+                    const extention_request_OID = [_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x0E };
+                    try builder.list.append(oid);
+                    try builder.list.append(@intCast(u8, extention_request_OID.len));
+                    try builder.list.appendSlice(&extention_request_OID);
+
+                    // Attribute Value:
+                    var attribute_values = try builder.newPrefixed(set);
+                    {
+                        // RFC 2985 5.4.2:
+                        // extensionRequest ATTRIBUTE ::= {
+                        //        WITH SYNTAX ExtensionRequest
+                        //        SINGLE VALUE TRUE
+                        //        ID pkcs-9-at-extensionRequest
+                        // }
+                        // ExtensionRequest ::= Extensions
+                        //
+                        // RFC 5280:
+                        // Extensions  ::=  SEQUENCE SIZE (1..MAX) OF Extension
+                        // Extension  ::=  SEQUENCE  {
+                        //      extnID      OBJECT IDENTIFIER,
+                        //      critical    BOOLEAN DEFAULT FALSE,
+                        //      extnValue   OCTET STRING
+                        //                  -- contains the DER encoding of an ASN.1 value
+                        //                  -- corresponding to the extension type identified
+                        //                  -- by extnID
+                        //      }
+                        //
+                        // Yeah I don't understand it too. ASN.1 is awesome!!
+
+                        var attribute_value = try builder.newPrefixed(sequence); // Sequence Of
+                        {
+                            if (dns_sans) |sans| {
+                                var requested_extension = try builder.newPrefixed(sequence);
+                                {
+                                    // extnID:
+                                    const subject_alt_name_OID = [_]u8{ 0x55, 0x1D, 0x11 };
+                                    try builder.list.append(oid);
+                                    try builder.list.append(@intCast(u8, subject_alt_name_OID.len));
+                                    try builder.list.appendSlice(&subject_alt_name_OID);
+
+                                    // extnValue:
+                                    var extension_value = try builder.newPrefixed(octetstring);
+                                    {
+                                        var general_names = try builder.newPrefixed(sequence);
+                                        {
+                                            // Context-specific class + 2.
+                                            const dns_name_tag: u8 = 0b10000000 | 2;
+                                            for (sans) |dns| {
+                                                for (dns) |char| if (!std.ascii.isASCII(char)) return error.InvalidDNSSan;
+                                                var dns_name = try builder.newPrefixed(dns_name_tag);
+                                                try builder.list.appendSlice(dns);
+                                                try builder.endPrefixed(dns_name);
+                                            }
+                                        }
+                                        try builder.endPrefixed(general_names);
+                                    }
+                                    try builder.endPrefixed(extension_value);
+                                }
+                                try builder.endPrefixed(requested_extension);
+                            }
+                        }
+                        try builder.endPrefixed(attribute_value);
+                    }
+                    try builder.endPrefixed(attribute_values);
+                }
+                try builder.endPrefixed(attribute);
+                try builder.endPrefixed(attributes);
+            }
         }
         try builder.endPrefixed(certifcateRequestInfo);
     }
