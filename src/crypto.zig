@@ -186,7 +186,6 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                             {
                                 // modulus:
                                 var modulus = try builder.newPrefixed(integer);
-                                // TODO: remove leading zeros for DER requirement??
                                 try builder.list.appendSlice(rsa.N);
                                 try builder.endPrefixed(modulus);
 
