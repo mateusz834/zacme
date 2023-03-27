@@ -182,26 +182,20 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                 {
                     switch (public) {
                         .RSA => |rsa| {
-                            // TODO: do this without an additional builder (like with extensions).
-                            var rsabuilder = derBuilder{ .list = std.ArrayList(u8).init(allocator) };
-                            defer rsabuilder.deinit();
-
-                            var rsa_sequence = try rsabuilder.newPrefixed(sequence);
+                            var rsa_sequence = try builder.newPrefixed(sequence);
                             {
                                 // modulus:
-                                var modulus = try rsabuilder.newPrefixed(integer);
+                                var modulus = try builder.newPrefixed(integer);
                                 // TODO: remove leading zeros for DER requirement??
-                                try rsabuilder.list.appendSlice(rsa.N);
-                                try rsabuilder.endPrefixed(modulus);
+                                try builder.list.appendSlice(rsa.N);
+                                try builder.endPrefixed(modulus);
 
                                 // exponent:
-                                var exponent = try rsabuilder.newPrefixed(integer);
-                                try rsabuilder.list.appendSlice(rsa.E);
-                                try rsabuilder.endPrefixed(exponent);
+                                var exponent = try builder.newPrefixed(integer);
+                                try builder.list.appendSlice(rsa.E);
+                                try builder.endPrefixed(exponent);
                             }
-                            try rsabuilder.endPrefixed(rsa_sequence);
-
-                            try builder.list.appendSlice(rsabuilder.list.items);
+                            try builder.endPrefixed(rsa_sequence);
                         },
                         .ECDSA => {
                             unreachable;
