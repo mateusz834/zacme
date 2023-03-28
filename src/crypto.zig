@@ -11,11 +11,11 @@ const openssl = @cImport({
     @cInclude("openssl.h");
 });
 
+// TODO: ed25519 + ed448
+
 const std = @import("std");
 const log = @import("./log.zig");
 const builtin = @import("builtin");
-
-const der = std.crypto.Certificate.der;
 
 const derBuilder = struct {
     list: std.ArrayList(u8),
@@ -734,53 +734,35 @@ pub const Key = struct {
     fn sign_ecdsa(rsa: *openssl.EVP_PKEY, curve: Type.Curve, allocator: std.mem.Allocator, data: []const u8, asn1_format: bool) SignError![]u8 {
         var sig = try sign_evp(rsa, curve.signing_hash().?, allocator, data);
         if (asn1_format) return sig;
-
         defer allocator.free(sig);
 
-        // TODO: this is DER encoded asn1, don't use openssl here, it is simple to extract.
+        // Extracting r and s from the DER encoded signature.
+        // Assuming that the encoding is a valid DER.
 
-        // TODO handle
-        var ecsig = openssl.ECDSA_SIG_new(); // orelse {
-        //    log.err("failed while creating the ECDSA signature decoding structure");
-        //	return SignError.EcdsaSigNewFailure;
-        //};
-        defer openssl.ECDSA_SIG_free(ecsig);
+        // The biggest supported curve is P521, so the length is < 255B.
+        const inner = if (sig[1] & 0b10000000 != 0) sig[3..] else sig[2..];
 
-        // What a mess here ....
-        var dataPtr: [1][*c]const u8 = [1][*]const u8{sig.ptr};
-        var dataPtr2: [*c][*c]const u8 = dataPtr[0..];
-        _ = openssl.d2i_ECDSA_SIG(&ecsig, dataPtr2, @intCast(c_long, sig.len)) orelse {
-            openssl_print_error("failed while decoding the DER-encoded ecdsa signature", .{});
-            return SignError.d21iEcdsaSigFailure;
-        };
+        // the coordinate is at most 66B so it will fit inside the 1B length encoding.
+        var r = inner[2 .. 2 + inner[1]];
+        var s = inner[4 + r.len ..];
 
-        var r = openssl.ECDSA_SIG_get0_r(ecsig) orelse {
-            openssl_print_error("failed while getting the ecdsa (r) coordinate", .{});
-            return SignError.EcdsaSigGet0RFailure;
-        };
-
-        var s = openssl.ECDSA_SIG_get0_s(ecsig) orelse {
-            openssl_print_error("failed while getting the ecdsa (s) coordinate", .{});
-            return SignError.EcdsaSigGet0SFailure;
-        };
+        // Ignore first byte if zero. Zero might be added, so that it is not intepreted as negative.
+        if (r.len > 0 and r[0] == 0) r = r[1..];
+        if (s.len > 0 and s[0] == 0) s = s[1..];
 
         var size = curve.size();
-        var jwsSig = try allocator.alloc(u8, size * 2);
-        errdefer allocator.free(jwsSig);
+        var jws_sig = try allocator.alloc(u8, size * 2);
+        errdefer allocator.free(jws_sig);
 
-        var ret = openssl.BN_bn2binpad(r, &jwsSig[0], @intCast(c_int, size));
-        if (ret <= 0) {
-            openssl_print_error("failed while getting the ecdsa coordinate (r) from bignum", .{});
-            return SignError.BnBn2BinpadFailure;
-        }
+        var rsig = jws_sig[0..size];
+        std.mem.set(u8, rsig[0 .. size - r.len], 0);
+        std.mem.copy(u8, rsig[size - r.len ..], r);
 
-        ret = openssl.BN_bn2binpad(s, &jwsSig[size], @intCast(c_int, size));
-        if (ret <= 0) {
-            openssl_print_error("failed while getting the ecdsa coordinate (s) from bignum", .{});
-            return SignError.BnBn2BinpadFailure;
-        }
+        var ssig = jws_sig[size..];
+        std.mem.set(u8, ssig[0 .. size - s.len], 0);
+        std.mem.copy(u8, ssig[size - s.len ..], s);
 
-        return jwsSig;
+        return jws_sig;
     }
 
     fn sign_evp(key: *openssl.EVP_PKEY, hash: *const openssl.EVP_MD, allocator: std.mem.Allocator, data: []const u8) SignError![]u8 {
