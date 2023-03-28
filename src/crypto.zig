@@ -170,8 +170,32 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                         try builder.list.append(null_tag);
                         try builder.list.append(0);
                     },
-                    .ECDSA => {
-                        unreachable;
+                    .ECDSA => |ecdsa| {
+                        // Algorithm OID:
+                        const ecdsa_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01 };
+                        try builder.list.append(oid);
+                        try builder.list.append(@intCast(u8, ecdsa_OID.len));
+                        try builder.list.appendSlice(&ecdsa_OID);
+
+                        // Algorithm parameters (named curve):
+                        try builder.list.append(oid);
+                        switch (ecdsa.Curve) {
+                            .P256 => {
+                                var p256_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 };
+                                try builder.list.append(@intCast(u8, p256_OID.len));
+                                try builder.list.appendSlice(&p256_OID);
+                            },
+                            .P384 => {
+                                var p384_OID = [_]u8{ 0x2B, 0x81, 0x04, 0x00, 0x22 };
+                                try builder.list.append(@intCast(u8, p384_OID.len));
+                                try builder.list.appendSlice(&p384_OID);
+                            },
+                            .P521 => {
+                                var p521_OID = [_]u8{ 0x2B, 0x81, 0x04, 0x00, 0x23 };
+                                try builder.list.append(@intCast(u8, p521_OID.len));
+                                try builder.list.appendSlice(&p521_OID);
+                            },
+                        }
                     },
                 }
                 try builder.endPrefixed(algorithm_identifer);
@@ -186,18 +210,35 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                             {
                                 // modulus:
                                 var modulus = try builder.newPrefixed(integer);
+                                // prepend zero, so it is not intepreted as negative number.
+                                if (rsa.N[0] & 0b10000000 != 0) try builder.list.append(0);
                                 try builder.list.appendSlice(rsa.N);
                                 try builder.endPrefixed(modulus);
 
                                 // exponent:
                                 var exponent = try builder.newPrefixed(integer);
+                                // prepend zero, so it is not intepreted as negative number.
+                                if (rsa.E[0] & 0b10000000 != 0) try builder.list.append(0);
                                 try builder.list.appendSlice(rsa.E);
                                 try builder.endPrefixed(exponent);
                             }
                             try builder.endPrefixed(rsa_sequence);
                         },
-                        .ECDSA => {
-                            unreachable;
+                        .ECDSA => |ecdsa| {
+                            // RFC 5480 2.2:
+                            // ECPoint ::= OCTET STRING
+                            // Implementations of Elliptic Curve Cryptography according to this
+                            // document MUST support the uncompressed form and MAY support the
+                            // compressed form of the ECC public key.
+                            //
+                            // The first octet of the OCTET STRING indicates whether the key is
+                            // compressed or uncompressed.  The uncompressed form is indicated
+                            // by 0x04
+
+                            try builder.list.append(0x04); // uncompressed form
+                            // x and y coordinates are already padded with zeros.
+                            try builder.list.appendSlice(ecdsa.X);
+                            try builder.list.appendSlice(ecdsa.Y);
                         },
                     }
                 }
@@ -205,11 +246,11 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
             }
             try builder.endPrefixed(subject_public_key_info);
 
+            // Attributes:
+            // Context-specific class + constructed bit.
+            const attributes_tag: u8 = 0b10100000;
+            var attributes = try builder.newPrefixed(attributes_tag);
             if (dns_sans != null) {
-                // Attributes:
-                // Context-specific class + constructed bit.
-                const attributes_tag: u8 = 0b10100000;
-                var attributes = try builder.newPrefixed(attributes_tag);
                 var attribute = try builder.newPrefixed(sequence);
                 {
                     // Attribute type:
@@ -258,6 +299,15 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                                     {
                                         var general_names = try builder.newPrefixed(sequence);
                                         {
+                                            // TODO RFC 5280 4.2.1.6:
+                                            // When the subjectAltName extension contains a domain name system
+                                            // label, the domain name MUST be stored in the dNSName (an IA5String).
+                                            // The name MUST be in the "preferred name syntax", as specified by
+                                            // Section 3.5 of [RFC1034] and as modified by Section 2.1 of
+                                            // [RFC1123].
+                                            // In  addition, while the string " " is a legal domain name, subjectAltName
+                                            // extensions with a dNSName of " " MUST NOT be used.
+
                                             // Context-specific class + 2.
                                             const dns_name_tag: u8 = 0b10000000 | 2;
                                             for (sans) |dns| {
@@ -279,14 +329,14 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                     try builder.endPrefixed(attribute_values);
                 }
                 try builder.endPrefixed(attribute);
-                try builder.endPrefixed(attributes);
             }
+            try builder.endPrefixed(attributes);
         }
         try builder.endPrefixed(certifcateRequestInfo);
     }
 
     var certification_request_info_bytes = builder.list.items[certifcateRequest.startLen..];
-    var signature = try key.sign(allocator, certification_request_info_bytes);
+    var signature = try key.sign(allocator, certification_request_info_bytes, true);
     defer allocator.free(signature);
 
     var algorithm_identifier = try builder.newPrefixed(sequence);
@@ -302,8 +352,30 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                 try builder.list.append(null_tag);
                 try builder.list.append(0);
             },
-            .ECDSA => {
-                unreachable;
+            .ECDSA => |ecdsa| {
+                try builder.list.append(oid);
+                switch (ecdsa.Curve) {
+                    .P256 => {
+                        var ec_sha256_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02 };
+                        try builder.list.append(@intCast(u8, ec_sha256_OID.len));
+                        try builder.list.appendSlice(&ec_sha256_OID);
+                    },
+                    .P384 => {
+                        var ec_sha384_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03 };
+                        try builder.list.append(@intCast(u8, ec_sha384_OID.len));
+                        try builder.list.appendSlice(&ec_sha384_OID);
+                    },
+                    .P521 => {
+                        var ec_sha512_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x04 };
+                        try builder.list.append(@intCast(u8, ec_sha512_OID.len));
+                        try builder.list.appendSlice(&ec_sha512_OID);
+                    },
+                }
+                // RFC 5758 3.2:
+                // When the ecdsa-with-SHA224, ecdsa-with-SHA256, ecdsa-with-SHA384, or
+                // ecdsa-with-SHA512 algorithm identifier appears in the algorithm field
+                // as an AlgorithmIdentifier, the encoding MUST omit the parameters
+                // field.
             },
         }
     }
@@ -321,12 +393,51 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
     return builder.list.toOwnedSlice();
 }
 
-test "buildCSR" {
+test "buildCSR RSA-2048" {
     var key = try Key.generate(.{ .RSA = 2048 });
     defer key.deinit();
-    var sans = [_][]const u8{ "example.com", "www.example.com" };
-    var csr = try buildCSR(std.testing.allocator, &key, "example.com", &sans);
+    try testCSRWithKey(&key);
+}
+
+test "buildCSR ECDSA-P256" {
+    var key = try Key.generate(.{ .ECDSA = .P256 });
+    defer key.deinit();
+    try testCSRWithKey(&key);
+}
+
+test "buildCSR ECDSA-P384" {
+    var key = try Key.generate(.{ .ECDSA = .P384 });
+    defer key.deinit();
+    try testCSRWithKey(&key);
+}
+
+test "buildCSR ECDSA-P521" {
+    var key = try Key.generate(.{ .ECDSA = .P521 });
+    defer key.deinit();
+    try testCSRWithKey(&key);
+}
+
+fn testCSRWithKey(key: *Key) !void {
+    var csr = try buildCSR(std.testing.allocator, key, "example.com", null);
     defer std.testing.allocator.free(csr);
+    try validateCSR(csr);
+
+    var sans = [_][]const u8{ "example.com", "www.example.com" };
+    var csr_with_sans = try buildCSR(std.testing.allocator, key, "example.com", &sans);
+    defer std.testing.allocator.free(csr_with_sans);
+    try validateCSR(csr_with_sans);
+}
+
+fn validateCSR(csr: []const u8) !void {
+    var dataPtr: [1][*c]const u8 = [1][*]const u8{csr.ptr};
+    var dataPtr2: [*c][*c]const u8 = dataPtr[0..];
+
+    var req = openssl.d2i_X509_REQ(null, dataPtr2, @intCast(c_long, csr.len)) orelse return error.DerParseFailure;
+    defer openssl.X509_REQ_free(req);
+
+    errdefer openssl_print_error("s", .{});
+    var pkey = openssl.X509_REQ_get_pubkey(req) orelse return error.PubKeyExtractFailure;
+    if (openssl.X509_REQ_verify(req, pkey) <= 0) return error.SignatureVerifyFailure;
 }
 
 pub const StreamingSha256 = struct {
@@ -605,14 +716,14 @@ pub const Key = struct {
         BnBn2BinpadFailure,
     } || std.mem.Allocator.Error;
 
-    pub fn sign(self: *const Key, allocator: std.mem.Allocator, data: []const u8) SignError![]u8 {
+    pub fn sign(self: *const Key, allocator: std.mem.Allocator, data: []const u8, ecdsa_asn1: bool) SignError![]u8 {
         if (self.pkey == null) {
             @panic("usage of null private key");
         }
 
         return switch (self.type) {
             Type.RSA => try sign_rsa(self.pkey.?, allocator, data),
-            Type.ECDSA => |curve| try sign_ecdsa(self.pkey.?, curve, allocator, data),
+            Type.ECDSA => |curve| try sign_ecdsa(self.pkey.?, curve, allocator, data, ecdsa_asn1),
         };
     }
 
@@ -620,9 +731,13 @@ pub const Key = struct {
         return sign_evp(rsa, openssl.EVP_sha256().?, allocator, data);
     }
 
-    fn sign_ecdsa(rsa: *openssl.EVP_PKEY, curve: Type.Curve, allocator: std.mem.Allocator, data: []const u8) SignError![]u8 {
+    fn sign_ecdsa(rsa: *openssl.EVP_PKEY, curve: Type.Curve, allocator: std.mem.Allocator, data: []const u8, asn1_format: bool) SignError![]u8 {
         var sig = try sign_evp(rsa, curve.signing_hash().?, allocator, data);
+        if (asn1_format) return sig;
+
         defer allocator.free(sig);
+
+        // TODO: this is DER encoded asn1, don't use openssl here, it is simple to extract.
 
         // TODO handle
         var ecsig = openssl.ECDSA_SIG_new(); // orelse {
@@ -695,16 +810,18 @@ pub const Key = struct {
             return SignError.EvpDigestSignFinalFailure;
         }
 
-        var sig = try allocator.alloc(u8, size);
-        errdefer allocator.free(sig);
+        var list = try std.ArrayList(u8).initCapacity(allocator, size);
+        list.expandToCapacity();
+        errdefer list.deinit();
 
-        ret = openssl.EVP_DigestSignFinal(md_ctx, &sig[0], &size);
+        ret = openssl.EVP_DigestSignFinal(md_ctx, &list.items[0], &size);
         if (ret <= 0) {
             openssl_print_error("failed while copying the final signature", .{});
             return SignError.EvpDigestSignFinalFailure;
         }
 
-        return sig;
+        try list.resize(size);
+        return list.toOwnedSlice();
     }
 
     pub const PublicKey = union(enum) {
@@ -837,9 +954,9 @@ fn testKey(keyType: Key.Type) !void {
     try std.testing.expectEqual(keyFromPEM.type, key.type);
 
     const signData = "sign data";
-    var sign = try key.sign(test_allocator, signData);
+    var sign = try key.sign(test_allocator, signData, false);
     defer test_allocator.free(sign);
-    var sign2 = try keyFromPEM.sign(test_allocator, signData);
+    var sign2 = try keyFromPEM.sign(test_allocator, signData, false);
     defer test_allocator.free(sign2);
 
     try testVerifySignature(key, signData, sign);

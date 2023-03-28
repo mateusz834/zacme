@@ -198,7 +198,7 @@ fn jws(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, hdrs: he
     signData[sizeJsonHeadersAsBase64] = '.';
     var payloadBase64 = base64Encoder.encode(signData[sizeJsonHeadersAsBase64 + 1 ..], jsonPayload);
 
-    var sign = try key.sign(allocator, signData);
+    var sign = try key.sign(allocator, signData, false);
     defer allocator.free(sign);
 
     var signatureBase64 = try allocator.alloc(u8, base64Encoder.calcSize(sign.len));
