@@ -299,19 +299,50 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                                     {
                                         var general_names = try builder.newPrefixed(sequence);
                                         {
-                                            // RFC 5280 4.2.1.6:
-                                            // When the subjectAltName extension contains a domain name system
-                                            // label, the domain name MUST be stored in the dNSName (an IA5String).
-                                            // The name MUST be in the "preferred name syntax", as specified by
-                                            // Section 3.5 of [RFC1034] and as modified by Section 2.1 of
-                                            // [RFC1123].
-                                            // In  addition, while the string " " is a legal domain name, subjectAltName
-                                            // extensions with a dNSName of " " MUST NOT be used.
 
                                             // Context-specific class + 2.
                                             const dns_name_tag: u8 = 0b10000000 | 2;
                                             for (sans) |dns| {
+                                                // RFC 5280 4.2.1.6:
+                                                // When the subjectAltName extension contains a domain name system
+                                                // label, the domain name MUST be stored in the dNSName (an IA5String).
+                                                // The name MUST be in the "preferred name syntax", as specified by
+                                                // Section 3.5 of [RFC1034] and as modified by Section 2.1 of
+                                                // [RFC1123].
+                                                // In  addition, while the string " " is a legal domain name, subjectAltName
+                                                // extensions with a dNSName of " " MUST NOT be used.
+
+                                                // RFC 6125 7.2.  Wildcard Certificates
+                                                // Specifications for existing application technologies are not clear
+                                                // or consistent about the allowable location of the wildcard
+                                                // character, such as whether it can be:
+                                                //  *  only the complete left-most label (e.g., *.example.com)
+                                                //
+                                                // *  some fragment of the left-most label (e.g., fo*.example.com,
+                                                //    f*o.example.com, or *oo.example.com)
+                                                //
+                                                // *  all or part of a label other than the left-most label (e.g.,
+                                                //    www.*.example.com or www.foo*.example.com)
+                                                //
+                                                // *  all or part of a label that identifies a so-called "public
+                                                //    suffix" (e.g., *.co.uk or *.com)
+                                                //
+                                                // *  included more than once in a given label (e.g.,
+                                                //    f*b*r.example.com
+                                                //
+                                                // *  included as all or part of more than one label (e.g.,
+                                                //    *.*.example.com)
+                                                //
+                                                // These ambiguities might introduce exploitable differences in
+                                                // identity checking behavior among client implementations and
+                                                // necessitate overly complex and inefficient identity checking
+                                                // algorithms.
+
+                                                // Allowing a '*' to appear anywhere in a label,
+                                                // let the issuer decide. whether to allow such domains.
+
                                                 if (!isValidHostname(dns)) return error.InvalidHostname;
+
                                                 var dns_name = try builder.newPrefixed(dns_name_tag);
                                                 try builder.list.appendSlice(dns);
                                                 try builder.endPrefixed(dns_name);
@@ -395,14 +426,13 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
 
 // isValidHostname reports whether the hostname is a valid hostname as
 // defined in RFC 1034 3.5. Preferred name syntax, but disallows " " as a valid hostname
-// and allows letter or digit as a first character in the label (RFC 1123 2.1).
+// also it allows letter or digit as a first character in the label (RFC 1123 2.1).
+// and '*' in any place of a label for wildcard domains. Treating '*' as one-or-more characters.
 fn isValidHostname(hostname: []const u8) bool {
-    if (hostname.len == 0)
+    if (hostname.len == 0 or hostname.len > 253)
         return false;
 
     if (hostname[hostname.len - 1] == '.') return false;
-
-    if (hostname.len > 253) return false;
 
     var label_start: usize = 0;
     for (hostname, 0..) |char, i| {
@@ -416,10 +446,17 @@ fn isValidHostname(hostname: []const u8) bool {
             continue;
         }
 
-        if (i == label_start) {
-            if (!std.ascii.isAlphanumeric(char)) return false;
+        if (char == '*') {
+            // Don't allow mutiple stars in a row.
+            if (i != label_start) {
+                if (hostname[i - 1] == '*') return false;
+            }
         } else {
-            if (!(std.ascii.isAlphanumeric(char) or char == '-')) return false;
+            if (i == label_start) {
+                if (!std.ascii.isAlphanumeric(char)) return false;
+            } else {
+                if (!(std.ascii.isAlphanumeric(char) or char == '-')) return false;
+            }
         }
 
         if (hostname.len - 1 == i) {
@@ -477,6 +514,22 @@ test "isValidHostname" {
     try std.testing.expect(!isValidHostname("example.sth." ++ ((("a" ** 63) ++ ".") ** 3) ++ ("b" ** 50)));
 
     try std.testing.expect(!isValidHostname("."));
+
+    try std.testing.expect(isValidHostname("*"));
+    try std.testing.expect(isValidHostname("*com"));
+    try std.testing.expect(isValidHostname("*.com"));
+    try std.testing.expect(isValidHostname("*.example.com"));
+    try std.testing.expect(isValidHostname("*-example.com"));
+    try std.testing.expect(isValidHostname("*0example.com"));
+    try std.testing.expect(isValidHostname("*exa*mple*.com"));
+    try std.testing.expect(isValidHostname("*.*com"));
+
+    try std.testing.expect(!isValidHostname("**"));
+    try std.testing.expect(!isValidHostname("**com"));
+    try std.testing.expect(!isValidHostname("*.*.**.com"));
+
+    try std.testing.expect(isValidHostname("*" ++ ("a" ** 61) ++ "*.example.com"));
+    try std.testing.expect(!isValidHostname("*" ++ ("a" ** 62) ++ "*.example.com"));
 }
 
 test "buildCSR RSA-2048" {
