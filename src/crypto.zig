@@ -561,7 +561,7 @@ fn testCSRWithKey(key: *Key) !void {
     defer std.testing.allocator.free(csr);
     try validateCSR(csr);
 
-    var sans = [_][]const u8{ "example.com", "www.example.com" };
+    var sans = [_][]const u8{ "example.com", "www.example.com", "*.admin.example.com" };
     var csr_with_sans = try buildCSR(std.testing.allocator, key, "example.com", &sans);
     defer std.testing.allocator.free(csr_with_sans);
     try validateCSR(csr_with_sans);
