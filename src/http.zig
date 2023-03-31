@@ -73,7 +73,13 @@ fn init() !void {
     // Each ACME function is accomplished by the client sending a sequence
     // of HTTPS requests to the server [RFC2818], carrying JSON messages
     // [RFC8259].  Use of HTTPS is REQUIRED.
-    try setOpt(curl.CURLOPT_PROTOCOLS_STR, "https");
+    if (@hasDecl(curl, "CURLOPT_PROTOCOLS_STR")) {
+        try setOpt(curl.CURLOPT_PROTOCOLS_STR, "https");
+    } else {
+        // Use the deprecated option on systems which
+        // don't have the newer CURLOPT_PROTOCOLS_STR.
+        try setOpt(curl.CURLOPT_PROTOCOLS, curl.CURLPROTO_HTTPS);
+    }
 }
 
 pub const Request = struct {
@@ -232,7 +238,7 @@ fn writeCallback(data: *anyopaque, _: c_uint, nmemb: c_uint, user_data: *anyopaq
 
     usr_data.list.appendSlice(typed_data[0..nmemb]) catch |err| {
         usr_data.err = err;
-        return curl.CURL_WRITEFUNC_ERROR;
+        return if (@hasDecl(curl, "CURL_WRITEFUNC_ERROR")) curl.CURL_WRITEFUNC_ERROR else 0xFFFFFFFF;
     };
 
     return nmemb;
@@ -265,7 +271,7 @@ fn headersCallback(data: *anyopaque, _: c_uint, nmemb: c_uint, user_data: *anyop
     }
     headerCallbackErr(header, usr_data) catch |err| {
         usr_data.err = err;
-        return curl.CURLE_WRITE_ERROR;
+        return if (@hasDecl(curl, "CURL_WRITEFUNC_ERROR")) curl.CURL_WRITEFUNC_ERROR else 0xFFFFFFFF;
     };
 
     return nmemb;
