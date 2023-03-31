@@ -299,7 +299,7 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                                     {
                                         var general_names = try builder.newPrefixed(sequence);
                                         {
-                                            // TODO RFC 5280 4.2.1.6:
+                                            // RFC 5280 4.2.1.6:
                                             // When the subjectAltName extension contains a domain name system
                                             // label, the domain name MUST be stored in the dNSName (an IA5String).
                                             // The name MUST be in the "preferred name syntax", as specified by
@@ -311,7 +311,7 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                                             // Context-specific class + 2.
                                             const dns_name_tag: u8 = 0b10000000 | 2;
                                             for (sans) |dns| {
-                                                for (dns) |char| if (!std.ascii.isASCII(char)) return error.InvalidDNSSan;
+                                                if (!isValidHostname(dns)) return error.InvalidHostname;
                                                 var dns_name = try builder.newPrefixed(dns_name_tag);
                                                 try builder.list.appendSlice(dns);
                                                 try builder.endPrefixed(dns_name);
@@ -393,6 +393,92 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
     return builder.list.toOwnedSlice();
 }
 
+// isValidHostname reports whether the hostname is a valid hostname as
+// defined in RFC 1034 3.5. Preferred name syntax, but disallows " " as a valid hostname
+// and allows letter or digit as a first character in the label (RFC 1123 2.1).
+fn isValidHostname(hostname: []const u8) bool {
+    if (hostname.len == 0)
+        return false;
+
+    if (hostname[hostname.len - 1] == '.') return false;
+
+    if (hostname.len > 253) return false;
+
+    var label_start: usize = 0;
+    for (hostname, 0..) |char, i| {
+        if (char == '.') {
+            if (i == 0 or hostname[i - 1] == '-') return false;
+
+            const len = i - label_start;
+            if (len == 0 or len > 63) return false;
+
+            label_start = i + 1;
+            continue;
+        }
+
+        if (i == label_start) {
+            if (!std.ascii.isAlphanumeric(char)) return false;
+        } else {
+            if (!(std.ascii.isAlphanumeric(char) or char == '-')) return false;
+        }
+
+        if (hostname.len - 1 == i) {
+            if (hostname[i] == '-') return false;
+            const len = (i - label_start) + 1;
+            if (len == 0 or len > 63) return false;
+            break;
+        }
+    }
+
+    return true;
+}
+
+test "isValidHostname" {
+    try std.testing.expect(!isValidHostname(""));
+    try std.testing.expect(!isValidHostname(" "));
+
+    try std.testing.expect(isValidHostname("9"));
+    try std.testing.expect(!isValidHostname("-"));
+
+    try std.testing.expect(isValidHostname("m"));
+    try std.testing.expect(isValidHostname("com"));
+    try std.testing.expect(isValidHostname("example.com"));
+    try std.testing.expect(isValidHostname("hello.example.com"));
+    try std.testing.expect(isValidHostname("h0l1o.example.com"));
+    try std.testing.expect(isValidHostname("ha0-o.example.com"));
+    try std.testing.expect(isValidHostname("hel-o.example.com"));
+    try std.testing.expect(isValidHostname("h-l-o.example.com"));
+    try std.testing.expect(isValidHostname("hello9.example.com"));
+    try std.testing.expect(isValidHostname("hello.e-xample.com"));
+
+    try std.testing.expect(isValidHostname("a.example.com"));
+
+    try std.testing.expect(isValidHostname("1.example.com"));
+    try std.testing.expect(isValidHostname("1hello.example.com"));
+    try std.testing.expect(isValidHostname("9hello.example.com"));
+    try std.testing.expect(!isValidHostname("-hello.example.com"));
+
+    try std.testing.expect(!isValidHostname(".example.com"));
+    try std.testing.expect(!isValidHostname("..example.com"));
+    try std.testing.expect(!isValidHostname("hello..example.com"));
+    try std.testing.expect(!isValidHostname("hello...example.com"));
+    try std.testing.expect(!isValidHostname("hello.example..com"));
+
+    try std.testing.expect(isValidHostname(("a" ** 63) ++ ".example.com"));
+    try std.testing.expect(!isValidHostname(("a" ** 64) ++ ".example.com"));
+
+    try std.testing.expect(isValidHostname(((("a" ** 63) ++ ".") ** 3) ++ ("b" ** 49) ++ ".example.com"));
+    try std.testing.expect(!isValidHostname(((("a" ** 63) ++ ".") ** 3) ++ ("b" ** 50) ++ ".example.com"));
+
+    try std.testing.expect(!isValidHostname("example.com-"));
+    try std.testing.expect(isValidHostname("example.9om"));
+
+    try std.testing.expect(isValidHostname("example.sth." ++ ((("a" ** 63) ++ ".") ** 3) ++ ("b" ** 49)));
+    try std.testing.expect(!isValidHostname("example.sth." ++ ((("a" ** 63) ++ ".") ** 3) ++ ("b" ** 50)));
+
+    try std.testing.expect(!isValidHostname("."));
+}
+
 test "buildCSR RSA-2048" {
     var key = try Key.generate(.{ .RSA = 2048 });
     defer key.deinit();
@@ -426,6 +512,9 @@ fn testCSRWithKey(key: *Key) !void {
     var csr_with_sans = try buildCSR(std.testing.allocator, key, "example.com", &sans);
     defer std.testing.allocator.free(csr_with_sans);
     try validateCSR(csr_with_sans);
+
+    var sans2 = [_][]const u8{"-s.example.com"};
+    try std.testing.expectError(error.InvalidHostname, buildCSR(std.testing.allocator, key, "example.com", &sans2));
 }
 
 fn validateCSR(csr: []const u8) !void {
