@@ -20,5 +20,11 @@ jobs:
       - name: Test
         run: zig build test
 
+      - name: Build ReleaseSafe
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Test ReleaseSafe
+        run: zig build test -Doptimize=ReleaseSafe
+
       - name: Fmt
         run: zig fmt --check src/*.zig
