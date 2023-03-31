@@ -11,6 +11,9 @@ jobs:
 
       - run: zig version
 
+      - name: Install dependencies
+        run: sudo apt install libcurl4-openssl-dev
+
       - name: Build
         run: zig build
 
