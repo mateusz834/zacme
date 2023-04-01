@@ -104,8 +104,12 @@ test "der builder big length" {
 // buildCSR builds a DER-encoded CSR as defined in RFC 2986.
 pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_sans: ?[][]const u8) ![]const u8 {
     // CommonName has a size limit (1..64) (RFC 5280).
-    if (cn.len < 1) return error.CommonNameTooShort;
     if (cn.len > 64) return error.CommonNameTooLong;
+
+    // The rfc doesn't specify the allowed content in the
+    // commonName, for now require it to be a valid hostname
+    // as for dNSName SANs.
+    if (!isValidHostname(cn)) return error.InvalidHostname;
 
     var public = try key.getPublicKey(allocator);
     defer public.deinit(allocator);
@@ -117,7 +121,7 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
     const sequence: u8 = 0x30;
     const set: u8 = 0x31;
     const oid: u8 = 0x06;
-    const utf8string: u8 = 0x0C;
+    const printable_string: u8 = 0x13;
     const bitstring: u8 = 0x03;
     const null_tag: u8 = 0x05;
     const integer: u8 = 0x02;
@@ -144,8 +148,7 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                 try builder.list.appendSlice(&common_name_OID);
 
                 // Value:
-                // TODO: printableString? think about it.
-                try builder.list.append(utf8string);
+                try builder.list.append(printable_string);
                 try builder.list.append(@intCast(u8, cn.len));
                 try builder.list.appendSlice(cn);
             }
@@ -557,9 +560,13 @@ test "buildCSR ECDSA-P521" {
 }
 
 fn testCSRWithKey(key: *Key) !void {
-    var csr = try buildCSR(std.testing.allocator, key, "example.com", null);
+    var csr = try buildCSR(std.testing.allocator, key, "*.example.com", null);
     defer std.testing.allocator.free(csr);
     try validateCSR(csr);
+
+    var csr2 = try buildCSR(std.testing.allocator, key, "a" ** 60 ++ ".com", null);
+    defer std.testing.allocator.free(csr2);
+    try validateCSR(csr2);
 
     var sans = [_][]const u8{ "example.com", "www.example.com", "*.admin.example.com" };
     var csr_with_sans = try buildCSR(std.testing.allocator, key, "example.com", &sans);
@@ -568,6 +575,9 @@ fn testCSRWithKey(key: *Key) !void {
 
     var sans2 = [_][]const u8{"-s.example.com"};
     try std.testing.expectError(error.InvalidHostname, buildCSR(std.testing.allocator, key, "example.com", &sans2));
+    try std.testing.expectError(error.InvalidHostname, buildCSR(std.testing.allocator, key, "-invalid-hostname.example.com", null));
+    try std.testing.expectError(error.InvalidHostname, buildCSR(std.testing.allocator, key, "", null));
+    try std.testing.expectError(error.CommonNameTooLong, buildCSR(std.testing.allocator, key, "a" ** 65, null));
 }
 
 fn validateCSR(csr: []const u8) !void {
