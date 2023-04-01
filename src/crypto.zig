@@ -157,97 +157,7 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
             try builder.endPrefixed(rdn_sequence);
 
             // subjectPKInfo:
-            var subject_public_key_info = try builder.newPrefixed(sequence);
-            {
-                // Algorithm identifier:
-                var algorithm_identifer = try builder.newPrefixed(sequence);
-                switch (public) {
-                    .RSA => {
-                        // Algorithm OID:
-                        const rsa_OID = [_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01 };
-                        try builder.list.append(oid);
-                        try builder.list.append(@intCast(u8, rsa_OID.len));
-                        try builder.list.appendSlice(&rsa_OID);
-
-                        // Algorithm parameters (RSA requires NULL):
-                        try builder.list.append(null_tag);
-                        try builder.list.append(0);
-                    },
-                    .ECDSA => |ecdsa| {
-                        // Algorithm OID:
-                        const ecdsa_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01 };
-                        try builder.list.append(oid);
-                        try builder.list.append(@intCast(u8, ecdsa_OID.len));
-                        try builder.list.appendSlice(&ecdsa_OID);
-
-                        // Algorithm parameters (named curve):
-                        try builder.list.append(oid);
-                        switch (ecdsa.Curve) {
-                            .P256 => {
-                                var p256_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 };
-                                try builder.list.append(@intCast(u8, p256_OID.len));
-                                try builder.list.appendSlice(&p256_OID);
-                            },
-                            .P384 => {
-                                var p384_OID = [_]u8{ 0x2B, 0x81, 0x04, 0x00, 0x22 };
-                                try builder.list.append(@intCast(u8, p384_OID.len));
-                                try builder.list.appendSlice(&p384_OID);
-                            },
-                            .P521 => {
-                                var p521_OID = [_]u8{ 0x2B, 0x81, 0x04, 0x00, 0x23 };
-                                try builder.list.append(@intCast(u8, p521_OID.len));
-                                try builder.list.appendSlice(&p521_OID);
-                            },
-                        }
-                    },
-                }
-                try builder.endPrefixed(algorithm_identifer);
-
-                // Public key:
-                var public_key = try builder.newPrefixed(bitstring);
-                try builder.list.append(0); // Number of unused bits prefix.
-                {
-                    switch (public) {
-                        .RSA => |rsa| {
-                            var rsa_sequence = try builder.newPrefixed(sequence);
-                            {
-                                // modulus:
-                                var modulus = try builder.newPrefixed(integer);
-                                // prepend zero, so it is not intepreted as negative number.
-                                if (rsa.N[0] & 0b10000000 != 0) try builder.list.append(0);
-                                try builder.list.appendSlice(rsa.N);
-                                try builder.endPrefixed(modulus);
-
-                                // exponent:
-                                var exponent = try builder.newPrefixed(integer);
-                                // prepend zero, so it is not intepreted as negative number.
-                                if (rsa.E[0] & 0b10000000 != 0) try builder.list.append(0);
-                                try builder.list.appendSlice(rsa.E);
-                                try builder.endPrefixed(exponent);
-                            }
-                            try builder.endPrefixed(rsa_sequence);
-                        },
-                        .ECDSA => |ecdsa| {
-                            // RFC 5480 2.2:
-                            // ECPoint ::= OCTET STRING
-                            // Implementations of Elliptic Curve Cryptography according to this
-                            // document MUST support the uncompressed form and MAY support the
-                            // compressed form of the ECC public key.
-                            //
-                            // The first octet of the OCTET STRING indicates whether the key is
-                            // compressed or uncompressed.  The uncompressed form is indicated
-                            // by 0x04
-
-                            try builder.list.append(0x04); // uncompressed form
-                            // x and y coordinates are already padded with zeros.
-                            try builder.list.appendSlice(ecdsa.X);
-                            try builder.list.appendSlice(ecdsa.Y);
-                        },
-                    }
-                }
-                try builder.endPrefixed(public_key);
-            }
-            try builder.endPrefixed(subject_public_key_info);
+            try encodeSubjectPublicKeyInfo(&builder, &public);
 
             // Attributes:
             // Context-specific class + constructed bit.
@@ -427,6 +337,106 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
     return builder.list.toOwnedSlice();
 }
 
+fn encodeSubjectPublicKeyInfo(builder: *derBuilder, public: *Key.PublicKey) !void {
+    const sequence: u8 = 0x30;
+    const oid: u8 = 0x06;
+    const bitstring: u8 = 0x03;
+    const null_tag: u8 = 0x05;
+    const integer: u8 = 0x02;
+
+    var subject_public_key_info = try builder.newPrefixed(sequence);
+    {
+        // Algorithm identifier:
+        var algorithm_identifer = try builder.newPrefixed(sequence);
+        switch (public.*) {
+            .RSA => {
+                // Algorithm OID:
+                const rsa_OID = [_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01 };
+                try builder.list.append(oid);
+                try builder.list.append(@intCast(u8, rsa_OID.len));
+                try builder.list.appendSlice(&rsa_OID);
+
+                // Algorithm parameters (RSA requires NULL):
+                try builder.list.append(null_tag);
+                try builder.list.append(0);
+            },
+            .ECDSA => |ecdsa| {
+                // Algorithm OID:
+                const ecdsa_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01 };
+                try builder.list.append(oid);
+                try builder.list.append(@intCast(u8, ecdsa_OID.len));
+                try builder.list.appendSlice(&ecdsa_OID);
+
+                // Algorithm parameters (named curve):
+                try builder.list.append(oid);
+                switch (ecdsa.Curve) {
+                    .P256 => {
+                        var p256_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 };
+                        try builder.list.append(@intCast(u8, p256_OID.len));
+                        try builder.list.appendSlice(&p256_OID);
+                    },
+                    .P384 => {
+                        var p384_OID = [_]u8{ 0x2B, 0x81, 0x04, 0x00, 0x22 };
+                        try builder.list.append(@intCast(u8, p384_OID.len));
+                        try builder.list.appendSlice(&p384_OID);
+                    },
+                    .P521 => {
+                        var p521_OID = [_]u8{ 0x2B, 0x81, 0x04, 0x00, 0x23 };
+                        try builder.list.append(@intCast(u8, p521_OID.len));
+                        try builder.list.appendSlice(&p521_OID);
+                    },
+                }
+            },
+        }
+        try builder.endPrefixed(algorithm_identifer);
+
+        // Public key:
+        var public_key = try builder.newPrefixed(bitstring);
+        try builder.list.append(0); // Number of unused bits prefix.
+        {
+            switch (public.*) {
+                .RSA => |rsa| {
+                    var rsa_sequence = try builder.newPrefixed(sequence);
+                    {
+                        // modulus:
+                        var modulus = try builder.newPrefixed(integer);
+                        // prepend zero, so it is not intepreted as negative number.
+                        if (rsa.N[0] & 0b10000000 != 0) try builder.list.append(0);
+                        try builder.list.appendSlice(rsa.N);
+                        try builder.endPrefixed(modulus);
+
+                        // exponent:
+                        var exponent = try builder.newPrefixed(integer);
+                        // prepend zero, so it is not intepreted as negative number.
+                        if (rsa.E[0] & 0b10000000 != 0) try builder.list.append(0);
+                        try builder.list.appendSlice(rsa.E);
+                        try builder.endPrefixed(exponent);
+                    }
+                    try builder.endPrefixed(rsa_sequence);
+                },
+                .ECDSA => |ecdsa| {
+                    // RFC 5480 2.2:
+                    // ECPoint ::= OCTET STRING
+                    // Implementations of Elliptic Curve Cryptography according to this
+                    // document MUST support the uncompressed form and MAY support the
+                    // compressed form of the ECC public key.
+                    //
+                    // The first octet of the OCTET STRING indicates whether the key is
+                    // compressed or uncompressed.  The uncompressed form is indicated
+                    // by 0x04
+
+                    try builder.list.append(0x04); // uncompressed form
+                    // x and y coordinates are already padded with zeros.
+                    try builder.list.appendSlice(ecdsa.X);
+                    try builder.list.appendSlice(ecdsa.Y);
+                },
+            }
+        }
+        try builder.endPrefixed(public_key);
+    }
+    try builder.endPrefixed(subject_public_key_info);
+}
+
 // isValidHostname reports whether the hostname is a valid hostname as
 // defined in RFC 1034 3.5. Preferred name syntax, but disallows " " as a valid hostname
 // also it allows letter or digit as a first character in the label (RFC 1123 2.1).
@@ -587,7 +597,6 @@ fn validateCSR(csr: []const u8) !void {
     var req = openssl.d2i_X509_REQ(null, dataPtr2, @intCast(c_long, csr.len)) orelse return error.DerParseFailure;
     defer openssl.X509_REQ_free(req);
 
-    errdefer openssl_print_error("s", .{});
     var pkey = openssl.X509_REQ_get_pubkey(req) orelse return error.PubKeyExtractFailure;
     if (openssl.X509_REQ_verify(req, pkey) <= 0) return error.SignatureVerifyFailure;
 }
@@ -898,9 +907,11 @@ pub const Key = struct {
         var r = inner[2 .. 2 + inner[1]];
         var s = inner[4 + r.len ..];
 
-        // Ignore first byte if zero. Zero might be added, so that it is not intepreted as negative.
+        // Ignore first byte if zero. Zero might be added, so that it is not interpreted as negative.
         if (r.len > 0 and r[0] == 0) r = r[1..];
         if (s.len > 0 and s[0] == 0) s = s[1..];
+
+        // Assuming that the integer is not negative (ECDSA r and s are positive)
 
         var size = curve.size();
         var jws_sig = try allocator.alloc(u8, size * 2);
@@ -1093,10 +1104,10 @@ fn testKey(keyType: Key.Type) !void {
     var sign2 = try keyFromPEM.sign(test_allocator, signData, false);
     defer test_allocator.free(sign2);
 
-    try testVerifySignature(key, signData, sign);
-    try testVerifySignature(key, signData, sign2);
-    try testVerifySignature(keyFromPEM, signData, sign);
-    try testVerifySignature(keyFromPEM, signData, sign2);
+    try testVerifySignature(key.type, key.pkey, signData, sign);
+    try testVerifySignature(key.type, key.pkey, signData, sign2);
+    try testVerifySignature(keyFromPEM.type, keyFromPEM.pkey, signData, sign);
+    try testVerifySignature(keyFromPEM.type, keyFromPEM.pkey, signData, sign2);
 
     var pub_key = try key.getPublicKey(test_allocator);
     defer pub_key.deinit(test_allocator);
@@ -1104,10 +1115,10 @@ fn testKey(keyType: Key.Type) !void {
     var pub2_key = try keyFromPEM.getPublicKey(test_allocator);
     defer pub2_key.deinit(test_allocator);
 
-    try verifySignatureFromPublicKey(pub_key, signData, sign);
-    try verifySignatureFromPublicKey(pub_key, signData, sign2);
-    try verifySignatureFromPublicKey(pub2_key, signData, sign);
-    try verifySignatureFromPublicKey(pub2_key, signData, sign2);
+    try verifySignatureFromPublicKey(&pub_key, signData, sign);
+    try verifySignatureFromPublicKey(&pub_key, signData, sign2);
+    try verifySignatureFromPublicKey(&pub2_key, signData, sign);
+    try verifySignatureFromPublicKey(&pub2_key, signData, sign2);
 
     try verifySignatureFromPublicKeyWithZigCrypto(pub_key, signData, sign);
     try verifySignatureFromPublicKeyWithZigCrypto(pub_key, signData, sign2);
@@ -1147,131 +1158,68 @@ fn verifySignatureFromPublicKeyWithZigCrypto(public: Key.PublicKey, data: []cons
     }
 }
 
-fn verifySignatureFromPublicKey(public: Key.PublicKey, data: []const u8, sig: []const u8) !void {
-    //const OSSL_PARAM_END = blk: {
-    //	var tmp: openssl.OSSL_PARAM = undefined;
-    //	tmp.key = null;
-    //	break :blk tmp;
-    //};
+fn verifySignatureFromPublicKey(public: *Key.PublicKey, data: []const u8, sig: []const u8) !void {
+    // Using encodeSubjectPublicKeyInfo, to simplify the test, instead of using weird
+    // openssl functions to make an EVP_PKEY from public key paramters.
+    var builder = derBuilder{ .list = std.ArrayList(u8).init(std.testing.allocator) };
+    defer builder.deinit();
+    errdefer builder.depth = 0;
+    try encodeSubjectPublicKeyInfo(&builder, public);
 
-    switch (public) {
-        .RSA => |rsa| {
-            var bn_e = openssl.BN_bin2bn(&rsa.E[0], @intCast(c_int, rsa.E.len), null) orelse return error.Failed;
-            defer openssl.BN_free(bn_e);
-            var bn_n = openssl.BN_bin2bn(&rsa.N[0], @intCast(c_int, rsa.N.len), null) orelse return error.Failed;
-            defer openssl.BN_free(bn_n);
+    var dataPtr: [1][*c]u8 = [1][*]u8{builder.list.items.ptr};
+    var dataPtr2: [*c][*c]u8 = dataPtr[0..];
+    var pkey = openssl.d2i_PUBKEY(null, dataPtr2, @intCast(c_long, builder.list.items.len)) orelse return error.Failed;
+    defer openssl.EVP_PKEY_free(pkey);
 
-            var rsa_key = openssl.RSA_new();
-            if (openssl.RSA_set0_key(rsa_key, bn_n, bn_e, null) <= 0)
-                return error.SignatureVerifyFailed;
-
-            var pkey = openssl.EVP_PKEY_new() orelse return error.Failed;
-            defer openssl.EVP_PKEY_free(pkey);
-
-            if (openssl.EVP_PKEY_set1_RSA(pkey, rsa_key) <= 0)
-                return error.Failed;
-
-            try testVerifySignature(Key{ .type = .{ .RSA = 0 }, .pkey = pkey }, data, sig);
-
-            //TODO: figure a way to do this without using a deprecated API.
-            //TODO: this below does not work.
-
-            //var ctx = openssl.EVP_PKEY_CTX_new_from_name(null, "RSA", null) orelse return error.Failed;
-            //defer openssl.EVP_PKEY_CTX_free(ctx);
-            //var params =  [_]openssl.OSSL_PARAM{
-            //	.{
-            //		.key = openssl.OSSL_PKEY_PARAM_RSA_E,
-            //		.data_type = openssl.OSSL_PARAM_UNSIGNED_INTEGER,
-            //		.data = bn_e,
-            //		.data_size = @intCast(usize, openssl.BN_num_bytes(bn_e)),
-            //		.return_size = openssl.OSSL_PARAM_UNMODIFIED
-            //	},
-            //	.{
-            //		.key = openssl.OSSL_PKEY_PARAM_RSA_N,
-            //		.data_type = openssl.OSSL_PARAM_UNSIGNED_INTEGER,
-            //		.data = bn_n,
-            //		.data_size = @intCast(usize, openssl.BN_num_bytes(bn_n)),
-            //		.return_size = openssl.OSSL_PARAM_UNMODIFIED
-            //	},
-            //	.{
-            //		.key = openssl.OSSL_PKEY_PARAM_RSA_D,
-            //		.data_type = openssl.OSSL_PARAM_UNSIGNED_INTEGER,
-            //		.data = null,
-            //		.data_size = 0,
-            //		.return_size = openssl.OSSL_PARAM_UNMODIFIED
-            //	},
-            //	OSSL_PARAM_END
-            //};
-
-            //if (openssl.EVP_PKEY_fromdata_init(ctx) <= 0)
-            //	return error.Failed;
-            //if (openssl.EVP_PKEY_fromdata(ctx, &pkey, openssl.EVP_PKEY_PUBLIC_KEY, &params[0]) <= 0)
-            //	return error.Failed;
-        },
-        .ECDSA => |ecdsa| {
-            var bn_x = openssl.BN_bin2bn(&ecdsa.X[0], @intCast(c_int, ecdsa.X.len), null) orelse return error.Failed;
-            defer openssl.BN_free(bn_x);
-            var bn_y = openssl.BN_bin2bn(&ecdsa.Y[0], @intCast(c_int, ecdsa.Y.len), null) orelse return error.Failed;
-            defer openssl.BN_free(bn_y);
-
-            var nid = switch (ecdsa.Curve) {
-                .P256 => openssl.NID_X9_62_prime256v1,
-                .P384 => openssl.NID_secp384r1,
-                .P521 => openssl.NID_secp521r1,
-            };
-
-            var ec_key = openssl.EC_KEY_new_by_curve_name(nid) orelse return error.Failed;
-            var group = openssl.EC_GROUP_new_by_curve_name(nid) orelse return error.Failed;
-            var point = openssl.EC_POINT_new(group) orelse return error.Failed;
-
-            if (openssl.EC_POINT_set_affine_coordinates(group, point, bn_x, bn_y, null) <= 0)
-                return error.Failed;
-
-            if (openssl.EC_KEY_set_public_key(ec_key, point) <= 0)
-                return error.Failed;
-
-            var pkey = openssl.EVP_PKEY_new() orelse return error.Failed;
-            defer openssl.EVP_PKEY_free(pkey);
-
-            if (openssl.EVP_PKEY_set1_EC_KEY(pkey, ec_key) <= 0)
-                return error.Failed;
-
-            try testVerifySignature(Key{ .type = .{ .ECDSA = ecdsa.Curve }, .pkey = pkey }, data, sig);
-        },
+    switch (public.*) {
+        .RSA => |_| try testVerifySignature(.{ .RSA = 0 }, pkey, data, sig),
+        .ECDSA => |ecdsa| try testVerifySignature(.{ .ECDSA = ecdsa.Curve }, pkey, data, sig),
     }
 }
 
-fn testVerifySignature(key: Key, data: []const u8, signature: []const u8) !void {
+fn testVerifySignature(key_type: Key.Type, pkey: ?*openssl.EVP_PKEY, data: []const u8, signature: []const u8) !void {
     var buf: [1024]u8 = undefined;
-    var sig = switch (key.type) {
+    var sig = switch (key_type) {
         .RSA => signature,
         .ECDSA => blk: {
             var sigLen = signature.len;
-            if (sigLen % 2 != 0) {
-                return error.SignatureVerifyFailed;
-            }
+            if (sigLen % 2 != 0) return error.SignatureVerifyFailed;
+
             var r = signature[0..(sigLen / 2)];
             var s = signature[(sigLen / 2)..];
+            for (r, 0..) |v, i| if (v != 0) {
+                r = r[i..];
+                break;
+            };
+            for (s, 0..) |v, i| if (v != 0) {
+                s = s[i..];
+                break;
+            };
 
-            var sig = openssl.ECDSA_SIG_new();
-            defer openssl.ECDSA_SIG_free(sig);
-            _ = openssl.ECDSA_SIG_set0(sig, openssl.BN_bin2bn(&r[0], @intCast(c_int, r.len), null), openssl.BN_bin2bn(&s[0], @intCast(c_int, s.len), null));
+            var builder = derBuilder{ .list = std.ArrayList(u8).init(std.testing.allocator) };
+            defer builder.deinit();
+            errdefer builder.depth = 0;
 
-            var len = openssl.i2d_ECDSA_SIG(sig, null);
-            var sign = buf[0..@intCast(usize, len)];
+            var seq = try builder.newPrefixed(0x30);
+            var r_int = try builder.newPrefixed(0x02);
+            if (r[0] & 0b10000000 != 0) try builder.list.append(0);
+            try builder.list.appendSlice(r);
+            try builder.endPrefixed(r_int);
+            var s_int = try builder.newPrefixed(0x02);
+            if (s[0] & 0b10000000 != 0) try builder.list.append(0);
+            try builder.list.appendSlice(s);
+            try builder.endPrefixed(s_int);
+            try builder.endPrefixed(seq);
 
-            // What a mess here ....
-            var dataPtr: [1][*c]u8 = [1][*]u8{sign.ptr};
-            var dataPtr2: [*c][*c]u8 = dataPtr[0..];
-            _ = openssl.i2d_ECDSA_SIG(sig, dataPtr2);
-            break :blk sign;
+            std.mem.copy(u8, &buf, builder.list.items);
+            break :blk buf[0..builder.list.items.len];
         },
     };
 
     var md_ctx = openssl.EVP_MD_CTX_create() orelse return error.SignatureVerifyFailed;
     defer openssl.EVP_MD_CTX_free(md_ctx);
 
-    var hash = switch (key.type) {
+    var hash = switch (key_type) {
         .RSA => openssl.EVP_sha256(),
         .ECDSA => |curve| switch (curve) {
             .P256 => openssl.EVP_sha256(),
@@ -1280,7 +1228,7 @@ fn testVerifySignature(key: Key, data: []const u8, signature: []const u8) !void 
         },
     };
 
-    if (openssl.EVP_DigestVerifyInit(md_ctx, null, hash, null, key.pkey) <= 0)
+    if (openssl.EVP_DigestVerifyInit(md_ctx, null, hash, null, pkey) <= 0)
         return error.SignatureVerifyFailed;
     if (openssl.EVP_DigestVerifyUpdate(md_ctx, &data[0], data.len) <= 0)
         return error.SignatureVerifyFailed;
