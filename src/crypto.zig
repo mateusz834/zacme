@@ -1071,59 +1071,55 @@ fn openssl_print_error(comptime fmt: []const u8, args: anytype) void {
 const test_allocator = std.testing.allocator;
 
 test "rsa-2048" {
-    try testKey(.{ .RSA = 2048 });
+    try testKeyType(.{ .RSA = 2048 });
 }
 
 test "ecdsa-P256" {
-    try testKey(.{ .ECDSA = .P256 });
+    try testKeyType(.{ .ECDSA = .P256 });
 }
 
 test "ecdsa-P384" {
-    try testKey(.{ .ECDSA = .P384 });
+    try testKeyType(.{ .ECDSA = .P384 });
 }
 
 test "ecdsa-P521" {
-    try testKey(.{ .ECDSA = .P521 });
+    try testKeyType(.{ .ECDSA = .P521 });
 }
 
-fn testKey(keyType: Key.Type) !void {
-    var key = try Key.generate(keyType);
+fn testKeyType(key_type: Key.Type) !void {
+    var key = try Key.generate(key_type);
     defer key.deinit();
-    try std.testing.expectEqual(keyType, key.type);
+    try std.testing.expectEqual(key_type, key.type);
 
-    var keyPem = try key.to_pem(test_allocator);
-    defer test_allocator.free(keyPem);
-    var keyFromPEM = try Key.from_pem(test_allocator, keyPem);
-    defer keyFromPEM.deinit();
+    var key_pem = try key.to_pem(test_allocator);
+    defer test_allocator.free(key_pem);
+    var key_from_pem = try Key.from_pem(test_allocator, key_pem);
+    defer key_from_pem.deinit();
 
-    try std.testing.expectEqual(keyFromPEM.type, key.type);
+    try std.testing.expectEqual(key_from_pem.type, key.type);
 
-    const signData = "sign data";
-    var sign = try key.sign(test_allocator, signData, false);
+    const sign_data = "sign data";
+
+    var sign = try key.sign(test_allocator, sign_data, false);
     defer test_allocator.free(sign);
-    var sign2 = try keyFromPEM.sign(test_allocator, signData, false);
+
+    var sign2 = try key_from_pem.sign(test_allocator, sign_data, false);
     defer test_allocator.free(sign2);
 
-    try testVerifySignature(key.type, key.pkey, signData, sign);
-    try testVerifySignature(key.type, key.pkey, signData, sign2);
-    try testVerifySignature(keyFromPEM.type, keyFromPEM.pkey, signData, sign);
-    try testVerifySignature(keyFromPEM.type, keyFromPEM.pkey, signData, sign2);
+    try testKey(key, sign_data, sign);
+    try testKey(key, sign_data, sign2);
+    try testKey(key_from_pem, sign_data, sign);
+    try testKey(key_from_pem, sign_data, sign2);
+}
+
+fn testKey(key: Key, sign_data: []const u8, sig: []const u8) !void {
+    try testVerifySignature(key.type, key.pkey, sign_data, sig);
 
     var pub_key = try key.getPublicKey(test_allocator);
     defer pub_key.deinit(test_allocator);
 
-    var pub2_key = try keyFromPEM.getPublicKey(test_allocator);
-    defer pub2_key.deinit(test_allocator);
-
-    try verifySignatureFromPublicKey(&pub_key, signData, sign);
-    try verifySignatureFromPublicKey(&pub_key, signData, sign2);
-    try verifySignatureFromPublicKey(&pub2_key, signData, sign);
-    try verifySignatureFromPublicKey(&pub2_key, signData, sign2);
-
-    try verifySignatureFromPublicKeyWithZigCrypto(pub_key, signData, sign);
-    try verifySignatureFromPublicKeyWithZigCrypto(pub_key, signData, sign2);
-    try verifySignatureFromPublicKeyWithZigCrypto(pub2_key, signData, sign);
-    try verifySignatureFromPublicKeyWithZigCrypto(pub2_key, signData, sign2);
+    try verifySignatureFromPublicKey(&pub_key, sign_data, sig);
+    try verifySignatureFromPublicKeyWithZigCrypto(pub_key, sign_data, sig);
 }
 
 fn verifySignatureFromPublicKeyWithZigCrypto(public: Key.PublicKey, data: []const u8, sig: []const u8) !void {
