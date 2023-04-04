@@ -9,6 +9,7 @@ fn jwsAlgName(key: crypto.Key) []const u8 {
             .P384 => "ES384",
             .P521 => "ES521",
         },
+        .ED25519, .ED448 => "EdDSA",
     };
 }
 
@@ -23,6 +24,8 @@ fn jwkCurveName(curve: crypto.Key.Type.Curve) []const u8 {
 pub const JWK = union(enum) {
     RSA: struct { E: []const u8, N: []const u8 },
     ECDSA: struct { Curve: []const u8, X: []const u8, Y: []const u8 },
+    ED25519: struct { X: []const u8 },
+    ED448: struct { X: []const u8 },
 
     pub fn jsonStringify(
         self: JWK,
@@ -31,27 +34,32 @@ pub const JWK = union(enum) {
     ) @TypeOf(out_stream).Error!void {
         switch (self) {
             .RSA => |val| {
-                const rsa = struct {
-                    e: []const u8,
-                    kty: []const u8 = "RSA",
-                    n: []const u8,
-                };
-                return std.json.stringify(rsa{
+                return std.json.stringify(.{
                     .e = val.E,
+                    .kty = "RSA",
                     .n = val.N,
                 }, options, out_stream);
             },
             .ECDSA => |val| {
-                const ecdsa = struct {
-                    crv: []const u8,
-                    kty: []const u8 = "EC",
-                    x: []const u8,
-                    y: []const u8,
-                };
-                return std.json.stringify(ecdsa{
+                return std.json.stringify(.{
                     .crv = val.Curve,
+                    .kty = "EC",
                     .x = val.X,
                     .y = val.Y,
+                }, options, out_stream);
+            },
+            .ED25519 => |val| {
+                return std.json.stringify(.{
+                    .crv = "Ed25519",
+                    .kty = "OKP",
+                    .x = val.X,
+                }, options, out_stream);
+            },
+            .ED448 => |val| {
+                return std.json.stringify(.{
+                    .crv = "Ed448",
+                    .kty = "OKP",
+                    .x = val.X,
                 }, options, out_stream);
             },
         }
@@ -67,6 +75,7 @@ pub const JWK = union(enum) {
                 allocator.free(ecdsa.X);
                 allocator.free(ecdsa.Y);
             },
+            inline .ED25519, .ED448 => |ed| allocator.free(ed.X),
         }
     }
 
@@ -86,6 +95,14 @@ pub const JWK = union(enum) {
                 errdefer allocator.free(y);
                 return .{ .ECDSA = .{ .Curve = jwkCurveName(ecdsa.Curve), .X = x, .Y = y } };
             },
+            .ED25519 => |ed| {
+                var x = try encodeBase64(allocator, &ed.X);
+                return .{ .ED25519 = .{ .X = x } };
+            },
+            .ED448 => |ed| {
+                var x = try encodeBase64(allocator, &ed.X);
+                return .{ .ED448 = .{ .X = x } };
+            },
         }
     }
 };
@@ -103,8 +120,8 @@ pub const JWK = union(enum) {
 // RFC 7638 3.3: The required members in the input to the hash function are ordered
 // lexicographically by the Unicode code points of the member names.
 test "JWK valid for JWK Tumbprint" {
-    const testValue1 = "test1";
-    const testValue2 = "test2";
+    const testValue1 = "t" ** 32;
+    const testValue2 = "a" ** 57;
     const b64TestValue1 = try encodeBase64(std.testing.allocator, testValue1);
     defer std.testing.allocator.free(b64TestValue1);
     const b64TestValue2 = try encodeBase64(std.testing.allocator, testValue2);
@@ -114,25 +131,45 @@ test "JWK valid for JWK Tumbprint" {
     defer jwkRSA.deinit(std.testing.allocator);
     var jwkECDSA = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .ECDSA = .{ .Curve = crypto.Key.Type.Curve.P384, .X = testValue1, .Y = testValue2 } });
     defer jwkECDSA.deinit(std.testing.allocator);
+    var jwkED2519 = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .ED25519 = .{ .X = testValue1[0..32].* } });
+    defer jwkED2519.deinit(std.testing.allocator);
+    var jwkED448 = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .ED448 = .{ .X = testValue2[0..57].* } });
+    defer jwkED448.deinit(std.testing.allocator);
 
-    var rsa = std.ArrayList(u8).init(std.testing.allocator);
-    defer rsa.deinit();
-    try jwkRSA.jsonStringify(.{}, rsa.writer());
+    var rsa = try std.json.stringifyAlloc(std.testing.allocator, jwkRSA, .{});
+    defer std.testing.allocator.free(rsa);
 
-    var ecdsa = std.ArrayList(u8).init(std.testing.allocator);
-    defer ecdsa.deinit();
-    try jwkECDSA.jsonStringify(.{}, ecdsa.writer());
+    var ecdsa = try std.json.stringifyAlloc(std.testing.allocator, jwkECDSA, .{});
+    defer std.testing.allocator.free(ecdsa);
+
+    var ed25519 = try std.json.stringifyAlloc(std.testing.allocator, jwkED2519, .{});
+    defer std.testing.allocator.free(ed25519);
+
+    var ed448 = try std.json.stringifyAlloc(std.testing.allocator, jwkED448, .{});
+    defer std.testing.allocator.free(ed448);
 
     try std.testing.expectFmt(
-        rsa.items,
+        rsa,
         "{s}\"e\":\"{s}\",\"kty\":\"{s}\",\"n\":\"{s}\"{s}",
         .{ "{", b64TestValue1, "RSA", b64TestValue2, "}" },
     );
 
     try std.testing.expectFmt(
-        ecdsa.items,
+        ecdsa,
         "{s}\"crv\":\"{s}\",\"kty\":\"{s}\",\"x\":\"{s}\",\"y\":\"{s}\"{s}",
         .{ "{", "P-384", "EC", b64TestValue1, b64TestValue2, "}" },
+    );
+
+    try std.testing.expectFmt(
+        ed25519,
+        "{s}\"crv\":\"{s}\",\"kty\":\"{s}\",\"x\":\"{s}\"{s}",
+        .{ "{", "Ed25519", "OKP", b64TestValue1, "}" },
+    );
+
+    try std.testing.expectFmt(
+        ed448,
+        "{s}\"crv\":\"{s}\",\"kty\":\"{s}\",\"x\":\"{s}\"{s}",
+        .{ "{", "Ed448", "OKP", b64TestValue2, "}" },
     );
 }
 

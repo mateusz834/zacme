@@ -284,11 +284,11 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
     defer allocator.free(signature);
 
     var algorithm_identifier = try builder.newPrefixed(sequence);
+    try builder.list.append(oid);
     {
         switch (public) {
             .RSA => {
                 const sha256WithRSA_OID = [_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B };
-                try builder.list.append(oid);
                 try builder.list.append(@intCast(u8, sha256WithRSA_OID.len));
                 try builder.list.appendSlice(&sha256WithRSA_OID);
 
@@ -297,7 +297,6 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                 try builder.list.append(0);
             },
             .ECDSA => |ecdsa| {
-                try builder.list.append(oid);
                 switch (ecdsa.Curve) {
                     .P256 => {
                         var ec_sha256_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02 };
@@ -320,6 +319,22 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                 // ecdsa-with-SHA512 algorithm identifier appears in the algorithm field
                 // as an AlgorithmIdentifier, the encoding MUST omit the parameters
                 // field.
+            },
+            .ED25519 => {
+                // Algorithm OID:
+                var ed25519_oid = [_]u8{ 0x2B, 0x65, 0x70 };
+                try builder.list.append(@intCast(u8, ed25519_oid.len));
+                try builder.list.appendSlice(&ed25519_oid);
+
+                // RFC 8410 3: For all of the OIDs, the parameters MUST be absent.
+            },
+            .ED448 => {
+                // Algorithm OID:
+                var ed448_oid = [_]u8{ 0x2B, 0x65, 0x71 };
+                try builder.list.append(@intCast(u8, ed448_oid.len));
+                try builder.list.appendSlice(&ed448_oid);
+
+                // RFC 8410 3: For all of the OIDs, the parameters MUST be absent.
             },
         }
     }
@@ -348,11 +363,11 @@ fn encodeSubjectPublicKeyInfo(builder: *derBuilder, public: *Key.PublicKey) !voi
     {
         // Algorithm identifier:
         var algorithm_identifer = try builder.newPrefixed(sequence);
+        try builder.list.append(oid);
         switch (public.*) {
             .RSA => {
                 // Algorithm OID:
                 const rsa_OID = [_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01 };
-                try builder.list.append(oid);
                 try builder.list.append(@intCast(u8, rsa_OID.len));
                 try builder.list.appendSlice(&rsa_OID);
 
@@ -363,7 +378,6 @@ fn encodeSubjectPublicKeyInfo(builder: *derBuilder, public: *Key.PublicKey) !voi
             .ECDSA => |ecdsa| {
                 // Algorithm OID:
                 const ecdsa_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01 };
-                try builder.list.append(oid);
                 try builder.list.append(@intCast(u8, ecdsa_OID.len));
                 try builder.list.appendSlice(&ecdsa_OID);
 
@@ -386,6 +400,22 @@ fn encodeSubjectPublicKeyInfo(builder: *derBuilder, public: *Key.PublicKey) !voi
                         try builder.list.appendSlice(&p521_OID);
                     },
                 }
+            },
+            .ED25519 => {
+                // Algorithm OID:
+                var ed25519_oid = [_]u8{ 0x2B, 0x65, 0x70 };
+                try builder.list.append(@intCast(u8, ed25519_oid.len));
+                try builder.list.appendSlice(&ed25519_oid);
+
+                // RFC 8410 3: For all of the OIDs, the parameters MUST be absent.
+            },
+            .ED448 => {
+                // Algorithm OID:
+                var ed448_oid = [_]u8{ 0x2B, 0x65, 0x71 };
+                try builder.list.append(@intCast(u8, ed448_oid.len));
+                try builder.list.appendSlice(&ed448_oid);
+
+                // RFC 8410 3: For all of the OIDs, the parameters MUST be absent.
             },
         }
         try builder.endPrefixed(algorithm_identifer);
@@ -430,6 +460,7 @@ fn encodeSubjectPublicKeyInfo(builder: *derBuilder, public: *Key.PublicKey) !voi
                     try builder.list.appendSlice(ecdsa.X);
                     try builder.list.appendSlice(ecdsa.Y);
                 },
+                inline .ED25519, .ED448 => |ed| try builder.list.appendSlice(&ed.X),
             }
         }
         try builder.endPrefixed(public_key);
@@ -569,6 +600,18 @@ test "buildCSR ECDSA-P521" {
     try testCSRWithKey(&key);
 }
 
+test "buildCSR ED25519" {
+    var key = try Key.generate(.ED25519);
+    defer key.deinit();
+    try testCSRWithKey(&key);
+}
+
+test "buildCSR ED448" {
+    var key = try Key.generate(.ED448);
+    defer key.deinit();
+    try testCSRWithKey(&key);
+}
+
 fn testCSRWithKey(key: *Key) !void {
     var csr = try buildCSR(std.testing.allocator, key, "*.example.com", null);
     defer std.testing.allocator.free(csr);
@@ -665,6 +708,8 @@ pub const Key = struct {
     pub const Type = union(enum) {
         RSA: u32,
         ECDSA: Curve,
+        ED25519,
+        ED448,
 
         pub const Curve = enum {
             P256,
@@ -728,17 +773,16 @@ pub const Key = struct {
         openssl.EVP_PKEY_free(self.pkey.?);
     }
 
-    pub const KeyGenerationError = error{
-        RSAKeyGenerationFailure,
-        ECDSAKeyGenerationFailure,
-    };
+    pub const KeyGenerationError = error{KeyGenerationFailure};
 
-    pub fn generate(keyType: Type) KeyGenerationError!Key {
-        var pkey = switch (keyType) {
+    pub fn generate(key_type: Type) KeyGenerationError!Key {
+        var pkey = switch (key_type) {
             Type.RSA => |size| try generate_rsa(size),
             Type.ECDSA => |curve| try generate_ecdsa(curve),
+            Type.ED25519 => try generate_ed25519(),
+            Type.ED448 => try generate_ed448(),
         };
-        return Key{ .type = keyType, .pkey = pkey };
+        return Key{ .type = key_type, .pkey = pkey };
     }
 
     fn generate_rsa(size: u32) KeyGenerationError!?*openssl.EVP_PKEY {
@@ -746,7 +790,7 @@ pub const Key = struct {
         // Defined in openssl.c.
         return openssl.gen_RSA(size) orelse {
             openssl_print_error("failed while generating RSA-{} key", .{size});
-            return KeyGenerationError.RSAKeyGenerationFailure;
+            return KeyGenerationError.KeyGenerationFailure;
         };
     }
 
@@ -756,7 +800,21 @@ pub const Key = struct {
         // Defined in openssl.c.
         return openssl.gen_ECDSA(curveName.ptr) orelse {
             openssl_print_error("failed while generating ECDSA with curve: '{s}'", .{curveName});
-            return KeyGenerationError.ECDSAKeyGenerationFailure;
+            return KeyGenerationError.KeyGenerationFailure;
+        };
+    }
+
+    fn generate_ed25519() KeyGenerationError!?*openssl.EVP_PKEY {
+        return openssl.EVP_PKEY_Q_keygen(null, null, "ED25519") orelse {
+            openssl_print_error("failed while generating ed25519 key", .{});
+            return KeyGenerationError.KeyGenerationFailure;
+        };
+    }
+
+    fn generate_ed448() KeyGenerationError!?*openssl.EVP_PKEY {
+        return openssl.EVP_PKEY_Q_keygen(null, null, "ED448") orelse {
+            openssl_print_error("failed while generating ed448 key", .{});
+            return KeyGenerationError.KeyGenerationFailure;
         };
     }
 
@@ -784,6 +842,8 @@ pub const Key = struct {
         return switch (nid) {
             openssl.EVP_PKEY_RSA => try from_pem_rsa(pkey),
             openssl.EVP_PKEY_EC => try from_pem_ecdsa(pkey, allocator),
+            openssl.EVP_PKEY_ED25519 => return .{ .type = .ED25519, .pkey = pkey },
+            openssl.EVP_PKEY_ED448 => return .{ .type = .ED448, .pkey = pkey },
             else => {
                 log.errf("unsupported private key type found inside the pem file: {s}", .{openssl.OBJ_nid2sn(nid)});
                 return PEMParseError.UnsupportedPrivKeyType;
@@ -885,6 +945,7 @@ pub const Key = struct {
         return switch (self.type) {
             Type.RSA => try sign_rsa(self.pkey.?, allocator, data),
             Type.ECDSA => |curve| try sign_ecdsa(self.pkey.?, curve, allocator, data, ecdsa_asn1),
+            Type.ED25519, Type.ED448 => try sign_eddsa(self.pkey.?, allocator, data),
         };
     }
 
@@ -929,7 +990,7 @@ pub const Key = struct {
     }
 
     fn sign_evp(key: *openssl.EVP_PKEY, hash: *const openssl.EVP_MD, allocator: std.mem.Allocator, data: []const u8) SignError![]u8 {
-        var md_ctx = openssl.EVP_MD_CTX_create() orelse {
+        var md_ctx = openssl.EVP_MD_CTX_new() orelse {
             openssl_print_error("failed while creating EVP_MD_CTX", .{});
             return SignError.EvpMdCtxCreateFailure;
         };
@@ -969,9 +1030,46 @@ pub const Key = struct {
         return list.toOwnedSlice();
     }
 
+    fn sign_eddsa(key: *openssl.EVP_PKEY, allocator: std.mem.Allocator, data: []const u8) SignError![]u8 {
+        var md_ctx = openssl.EVP_MD_CTX_new() orelse {
+            openssl_print_error("failed while creating EVP_MD_CTX", .{});
+            return SignError.EvpMdCtxCreateFailure;
+        };
+        defer openssl.EVP_MD_CTX_free(md_ctx);
+
+        var evp_pkey: ?*openssl.EVP_PKEY_CTX = null;
+        var ret = openssl.EVP_DigestSignInit(md_ctx, &evp_pkey, null, null, key);
+        if (ret <= 0) {
+            openssl_print_error("failed while initializing the digest signer", .{});
+            return SignError.EvpDigestSignInitFailure;
+        }
+
+        var size: usize = 0;
+        ret = openssl.EVP_DigestSign(md_ctx, null, &size, data.ptr, data.len);
+        if (ret <= 0) {
+            openssl_print_error("failed while determining the final signature size", .{});
+            return SignError.EvpDigestSignFinalFailure;
+        }
+
+        var list = try std.ArrayList(u8).initCapacity(allocator, size);
+        list.expandToCapacity();
+        errdefer list.deinit();
+
+        ret = openssl.EVP_DigestSign(md_ctx, &list.items[0], &size, data.ptr, data.len);
+        if (ret <= 0) {
+            openssl_print_error("failed while copying the final signature", .{});
+            return SignError.EvpDigestSignFinalFailure;
+        }
+
+        try list.resize(size);
+        return list.toOwnedSlice();
+    }
+
     pub const PublicKey = union(enum) {
         RSA: struct { E: []const u8, N: []const u8 },
         ECDSA: struct { Curve: Type.Curve, X: []const u8, Y: []const u8 },
+        ED25519: struct { X: [32]u8 },
+        ED448: struct { X: [57]u8 },
 
         pub fn deinit(self: *PublicKey, allocator: std.mem.Allocator) void {
             switch (self.*) {
@@ -983,6 +1081,7 @@ pub const Key = struct {
                     allocator.free(ecdsa.X);
                     allocator.free(ecdsa.Y);
                 },
+                .ED25519, .ED448 => {},
             }
         }
     };
@@ -1001,6 +1100,24 @@ pub const Key = struct {
                 errdefer allocator.free(x);
                 var y = try evp_pkey_get_bignum_param_padded(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_Y, size);
                 return .{ .ECDSA = .{ .Curve = curve, .X = x, .Y = y } };
+            },
+            .ED25519 => {
+                var x: [32]u8 = undefined;
+                var ret = openssl.EVP_PKEY_get_octet_string_param(self.pkey, openssl.OSSL_PKEY_PARAM_PUB_KEY, &x[0], x.len, null);
+                if (ret <= 0) {
+                    openssl_print_error("failed while retreiving the octet string public key from the key", .{});
+                    return error.EVPPKEYGetOctetStringParamFailure;
+                }
+                return .{ .ED25519 = .{ .X = x } };
+            },
+            .ED448 => {
+                var x: [57]u8 = undefined;
+                var ret = openssl.EVP_PKEY_get_octet_string_param(self.pkey, openssl.OSSL_PKEY_PARAM_PUB_KEY, &x[0], x.len, null);
+                if (ret <= 0) {
+                    openssl_print_error("failed while retreiving the octet string public key from the key", .{});
+                    return error.EVPPKEYGetOctetStringParamFailure;
+                }
+                return .{ .ED448 = .{ .X = x } };
             },
         }
     }
@@ -1086,6 +1203,14 @@ test "ecdsa-P521" {
     try testKeyType(.{ .ECDSA = .P521 });
 }
 
+test "ed25519" {
+    try testKeyType(.ED25519);
+}
+
+test "ed448" {
+    try testKeyType(.ED448);
+}
+
 fn testKeyType(key_type: Key.Type) !void {
     var key = try Key.generate(key_type);
     defer key.deinit();
@@ -1118,8 +1243,8 @@ fn testKey(key: Key, sign_data: []const u8, sig: []const u8) !void {
     var pub_key = try key.getPublicKey(test_allocator);
     defer pub_key.deinit(test_allocator);
 
-    try verifySignatureFromPublicKey(&pub_key, sign_data, sig);
     try verifySignatureFromPublicKeyWithZigCrypto(pub_key, sign_data, sig);
+    try verifySignatureFromPublicKey(&pub_key, sign_data, sig);
 }
 
 fn verifySignatureFromPublicKeyWithZigCrypto(public: Key.PublicKey, data: []const u8, sig: []const u8) !void {
@@ -1150,6 +1275,12 @@ fn verifySignatureFromPublicKeyWithZigCrypto(public: Key.PublicKey, data: []cons
                 else => {},
             }
         },
+        .ED25519 => |ed25519| {
+            const ed = std.crypto.sign.Ed25519;
+            var key = try ed.PublicKey.fromBytes(ed25519.X);
+            var s = ed.Signature.fromBytes(sig[0..ed.Signature.encoded_length].*);
+            try s.verify(data, key);
+        },
         else => {},
     }
 }
@@ -1170,13 +1301,15 @@ fn verifySignatureFromPublicKey(public: *Key.PublicKey, data: []const u8, sig: [
     switch (public.*) {
         .RSA => |_| try testVerifySignature(.{ .RSA = 0 }, pkey, data, sig),
         .ECDSA => |ecdsa| try testVerifySignature(.{ .ECDSA = ecdsa.Curve }, pkey, data, sig),
+        .ED25519 => try testVerifySignature(.ED25519, pkey, data, sig),
+        .ED448 => try testVerifySignature(.ED448, pkey, data, sig),
     }
 }
 
 fn testVerifySignature(key_type: Key.Type, pkey: ?*openssl.EVP_PKEY, data: []const u8, signature: []const u8) !void {
     var buf: [1024]u8 = undefined;
     var sig = switch (key_type) {
-        .RSA => signature,
+        .RSA, .ED25519, .ED448 => signature,
         .ECDSA => blk: {
             var sigLen = signature.len;
             if (sigLen % 2 != 0) return error.SignatureVerifyFailed;
@@ -1222,12 +1355,11 @@ fn testVerifySignature(key_type: Key.Type, pkey: ?*openssl.EVP_PKEY, data: []con
             .P384 => openssl.EVP_sha384(),
             .P521 => openssl.EVP_sha512(),
         },
+        .ED25519, .ED448 => null,
     };
 
     if (openssl.EVP_DigestVerifyInit(md_ctx, null, hash, null, pkey) <= 0)
         return error.SignatureVerifyFailed;
-    if (openssl.EVP_DigestVerifyUpdate(md_ctx, &data[0], data.len) <= 0)
-        return error.SignatureVerifyFailed;
-    if (openssl.EVP_DigestVerifyFinal(md_ctx, &sig[0], sig.len) <= 0)
+    if (openssl.EVP_DigestVerify(md_ctx, &sig[0], sig.len, &data[0], data.len) <= 0)
         return error.SignatureVerifyFailed;
 }
