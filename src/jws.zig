@@ -21,91 +21,63 @@ fn jwkCurveName(curve: crypto.Key.Type.Curve) []const u8 {
     };
 }
 
-pub const JWK = union(enum) {
-    RSA: struct { E: []const u8, N: []const u8 },
-    ECDSA: struct { Curve: []const u8, X: []const u8, Y: []const u8 },
-    ED25519: struct { X: []const u8 },
-    ED448: struct { X: []const u8 },
+fn ArrayJsonBase64Encoder(comptime length: comptime_int) type {
+    return struct {
+        data: *const [length]u8,
+        pub fn jsonStringify(self: @This(), options: std.json.StringifyOptions, out_stream: anytype) !void {
+            var out: [base64Encoder.calcSize(length)]u8 = undefined;
+            try std.json.stringify(base64Encoder.encode(&out, self.data), options, out_stream);
+        }
+    };
+}
 
-    pub fn jsonStringify(
-        self: JWK,
-        options: std.json.StringifyOptions,
-        out_stream: anytype,
-    ) @TypeOf(out_stream).Error!void {
-        switch (self) {
+const SliceJsonBase64Encoder = struct {
+    data: []const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn jsonStringify(self: @This(), options: std.json.StringifyOptions, out_stream: anytype) !void {
+        var out = try self.allocator.alloc(u8, base64Encoder.calcSize(self.data.len));
+        defer self.allocator.free(out);
+        try std.json.stringify(base64Encoder.encode(out, self.data), options, out_stream);
+    }
+};
+
+pub const JWK = struct {
+    public_key: *const crypto.Key.PublicKey,
+    allocator: std.mem.Allocator,
+
+    pub fn jsonStringify(self: JWK, options: std.json.StringifyOptions, out_stream: anytype) !void {
+        switch (self.public_key.*) {
             .RSA => |val| {
                 return std.json.stringify(.{
-                    .e = val.E,
+                    .e = SliceJsonBase64Encoder{ .data = val.E, .allocator = self.allocator },
                     .kty = "RSA",
-                    .n = val.N,
+                    .n = SliceJsonBase64Encoder{ .data = val.N, .allocator = self.allocator },
                 }, options, out_stream);
             },
-            .ECDSA => |val| {
-                return std.json.stringify(.{
-                    .crv = val.Curve,
-                    .kty = "EC",
-                    .x = val.X,
-                    .y = val.Y,
-                }, options, out_stream);
+            .ECDSA => |ec| switch (ec) {
+                inline else => |val, ecdsa| {
+                    return std.json.stringify(.{
+                        .crv = jwkCurveName(ecdsa),
+                        .kty = "EC",
+                        .x = ArrayJsonBase64Encoder(ecdsa.size()){ .data = &val.X },
+                        .y = ArrayJsonBase64Encoder(ecdsa.size()){ .data = &val.Y },
+                    }, options, out_stream);
+                },
             },
             .ED25519 => |val| {
                 return std.json.stringify(.{
                     .crv = "Ed25519",
                     .kty = "OKP",
-                    .x = val.X,
+                    .x = ArrayJsonBase64Encoder(32){ .data = &val.X },
                 }, options, out_stream);
             },
             .ED448 => |val| {
                 return std.json.stringify(.{
                     .crv = "Ed448",
                     .kty = "OKP",
-                    .x = val.X,
+                    .x = ArrayJsonBase64Encoder(57){ .data = &val.X },
                 }, options, out_stream);
-            },
-        }
-    }
-
-    pub fn deinit(self: JWK, allocator: std.mem.Allocator) void {
-        switch (self) {
-            .RSA => |rsa| {
-                allocator.free(rsa.E);
-                allocator.free(rsa.N);
-            },
-            .ECDSA => |ecdsa| {
-                allocator.free(ecdsa.X);
-                allocator.free(ecdsa.Y);
-            },
-            inline .ED25519, .ED448 => |ed| allocator.free(ed.X),
-        }
-    }
-
-    pub fn fromCryptoPublicKey(allocator: std.mem.Allocator, public: crypto.Key.PublicKey) !JWK {
-        switch (public) {
-            .RSA => |rsa| {
-                var e = try encodeBase64(allocator, rsa.E);
-                errdefer allocator.free(e);
-                var n = try encodeBase64(allocator, rsa.N);
-                errdefer allocator.free(n);
-                return .{ .RSA = .{ .E = e, .N = n } };
-            },
-            .ECDSA => |ec| {
-                switch (ec) {
-                    inline else => |ecdsa| {
-                        var x = try encodeBase64(allocator, &ecdsa.X);
-                        errdefer allocator.free(x);
-                        var y = try encodeBase64(allocator, &ecdsa.Y);
-                        errdefer allocator.free(y);
-                        return .{ .ECDSA = .{ .Curve = jwkCurveName(ec), .X = x, .Y = y } };
-                    },
-                }
-            },
-            .ED25519 => |ed| {
-                var x = try encodeBase64(allocator, &ed.X);
-                return .{ .ED25519 = .{ .X = x } };
-            },
-            .ED448 => |ed| {
-                var x = try encodeBase64(allocator, &ed.X);
-                return .{ .ED448 = .{ .X = x } };
             },
         }
     }
@@ -131,25 +103,21 @@ test "JWK valid for JWK Tumbprint" {
     const b64TestValue2 = try encodeBase64(std.testing.allocator, testValue2);
     defer std.testing.allocator.free(b64TestValue2);
 
-    var jwkRSA = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .RSA = .{ .E = testValue1, .N = testValue2 } });
-    defer jwkRSA.deinit(std.testing.allocator);
-    var jwkECDSA = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .ECDSA = .{ .P256 = .{ .X = testValue1[0..32].*, .Y = testValue1[0..32].* } } });
-    defer jwkECDSA.deinit(std.testing.allocator);
-    var jwkED2519 = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .ED25519 = .{ .X = testValue1[0..32].* } });
-    defer jwkED2519.deinit(std.testing.allocator);
-    var jwkED448 = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .ED448 = .{ .X = testValue2[0..57].* } });
-    defer jwkED448.deinit(std.testing.allocator);
+    var jwkRSA = JWK{ .public_key = &crypto.Key.PublicKey{ .RSA = .{ .E = testValue1, .N = testValue2 } }, .allocator = std.testing.allocator };
+    var jwkECDSA = JWK{ .public_key = &crypto.Key.PublicKey{ .ECDSA = .{ .P256 = .{ .X = testValue1[0..32].*, .Y = testValue1[0..32].* } } }, .allocator = std.testing.allocator };
+    var jwkED2519 = JWK{ .public_key = &crypto.Key.PublicKey{ .ED25519 = .{ .X = testValue1[0..32].* } }, .allocator = std.testing.allocator };
+    var jwkED448 = JWK{ .public_key = &crypto.Key.PublicKey{ .ED448 = .{ .X = testValue2[0..57].* } }, .allocator = std.testing.allocator };
 
     var rsa = try std.json.stringifyAlloc(std.testing.allocator, jwkRSA, .{});
     defer std.testing.allocator.free(rsa);
 
-    var ecdsa = try std.json.stringifyAlloc(std.testing.allocator, jwkECDSA, .{});
+    var ecdsa = try std.json.stringifyAlloc(std.testing.allocator, &jwkECDSA, .{});
     defer std.testing.allocator.free(ecdsa);
 
-    var ed25519 = try std.json.stringifyAlloc(std.testing.allocator, jwkED2519, .{});
+    var ed25519 = try std.json.stringifyAlloc(std.testing.allocator, &jwkED2519, .{});
     defer std.testing.allocator.free(ed25519);
 
-    var ed448 = try std.json.stringifyAlloc(std.testing.allocator, jwkED448, .{});
+    var ed448 = try std.json.stringifyAlloc(std.testing.allocator, &jwkED448, .{});
     defer std.testing.allocator.free(ed448);
 
     try std.testing.expectFmt(
@@ -195,19 +163,17 @@ pub fn withKID(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, 
 }
 
 pub fn withJWK(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, nonce: ?[]const u8, url: []const u8) ![]const u8 {
-    var hdrs = headers{
+    var public = try key.getPublicKey(allocator);
+    defer public.deinit(allocator);
+    return jws(allocator, key, payload, .{
         .alg = jwsAlgName(key),
         .nonce = nonce,
         .url = url,
-    };
-
-    var public = try key.getPublicKey(allocator);
-    defer public.deinit(allocator);
-
-    hdrs.jwk = try JWK.fromCryptoPublicKey(allocator, public);
-    defer hdrs.jwk.?.deinit(allocator);
-
-    return jws(allocator, key, payload, hdrs);
+        .jwk = .{
+            .public_key = &public,
+            .allocator = allocator,
+        },
+    });
 }
 
 const base64Encoder = std.base64.url_safe_no_pad.Encoder;

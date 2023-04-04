@@ -415,9 +415,8 @@ pub const Client = struct {
 
         var kc = keyChange{
             .account = kid,
-            .oldKey = try jws.JWK.fromCryptoPublicKey(self.allocator, public),
+            .oldKey = jws.JWK{ .public_key = &public, .allocator = self.allocator },
         };
-        defer kc.oldKey.deinit(self.allocator);
 
         var dir = try self.getDirectory();
 
@@ -590,18 +589,33 @@ pub const Client = struct {
         }
     }
 
+    fn OutOfMemoryWriter(comptime W: type) type {
+        return struct {
+            writer_stream: W,
+            pub fn writer(self: @This()) std.io.Writer(@This(), W.Error || std.mem.Allocator.Error, write) {
+                return .{ .context = self };
+            }
+
+            fn write(context: @This(), bytes: []const u8) (W.Error || std.mem.Allocator.Error)!usize {
+                return context.writer_stream.write(bytes);
+            }
+        };
+    }
+
     // keyAuthToWriter writes the RFC 8555 8.1 Key Authorizations to the writer.
     fn keyAuthToWriter(self: *Client, token: []const u8, writer: anytype) !void {
         var public = try self.accountKey.getPublicKey(self.allocator);
         defer public.deinit(self.allocator);
 
-        const jwk = try jws.JWK.fromCryptoPublicKey(self.allocator, public);
-        defer jwk.deinit(self.allocator);
-
         var sha256 = try crypto.StreamingSha256.init();
         defer sha256.deinit();
 
-        try std.json.stringify(jwk, .{}, sha256.writer());
+        const wrt = sha256.writer();
+
+        // So that std.json.stringify() can return OutOfMemory with StreamingSha256
+        var oom_writer = OutOfMemoryWriter(@TypeOf(wrt)){ .writer_stream = wrt };
+
+        try std.json.stringify(jws.JWK{ .public_key = &public, .allocator = self.allocator }, .{}, oom_writer.writer());
 
         const thumbprint = try sha256.final();
 
