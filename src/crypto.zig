@@ -60,6 +60,14 @@ const derBuilder = struct {
         if (builtin.mode == .Debug and self.depth != 0) @panic("deinit() called on derBuilder when depth != 0");
         self.list.deinit();
     }
+
+    // appendOID appends OID to the builder, oid must fit into
+    // the ene byte length DER encoding.
+    pub fn appendOID(self: *derBuilder, oid: []const u8) !void {
+        try self.list.append(0x06);
+        try self.list.append(@intCast(u8, oid.len));
+        try self.list.appendSlice(oid);
+    }
 };
 
 test "der builder small length" {
@@ -120,7 +128,6 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
 
     const sequence: u8 = 0x30;
     const set: u8 = 0x31;
-    const oid: u8 = 0x06;
     const printable_string: u8 = 0x13;
     const bitstring: u8 = 0x03;
     const null_tag: u8 = 0x05;
@@ -142,10 +149,7 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
             var attribute_type_and_value = try builder.newPrefixed(sequence);
             {
                 // Type: OID: 2.5.4.3 (commonName).
-                const common_name_OID = [_]u8{ 85, 4, 3 };
-                try builder.list.append(oid);
-                try builder.list.append(@intCast(u8, common_name_OID.len));
-                try builder.list.appendSlice(&common_name_OID);
+                try builder.appendOID(&[_]u8{ 85, 4, 3 });
 
                 // Value:
                 try builder.list.append(printable_string);
@@ -168,9 +172,7 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                 {
                     // Attribute type:
                     const extention_request_OID = [_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x0E };
-                    try builder.list.append(oid);
-                    try builder.list.append(@intCast(u8, extention_request_OID.len));
-                    try builder.list.appendSlice(&extention_request_OID);
+                    try builder.appendOID(&extention_request_OID);
 
                     // Attribute Value:
                     var attribute_values = try builder.newPrefixed(set);
@@ -203,9 +205,7 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                                 {
                                     // extnID:
                                     const subject_alt_name_OID = [_]u8{ 0x55, 0x1D, 0x11 };
-                                    try builder.list.append(oid);
-                                    try builder.list.append(@intCast(u8, subject_alt_name_OID.len));
-                                    try builder.list.appendSlice(&subject_alt_name_OID);
+                                    try builder.appendOID(&subject_alt_name_OID);
 
                                     // extnValue:
                                     var extension_value = try builder.newPrefixed(octetstring);
@@ -284,13 +284,11 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
     defer allocator.free(signature);
 
     var algorithm_identifier = try builder.newPrefixed(sequence);
-    try builder.list.append(oid);
     {
         switch (public) {
             .RSA => {
                 const sha256WithRSA_OID = [_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B };
-                try builder.list.append(@intCast(u8, sha256WithRSA_OID.len));
-                try builder.list.appendSlice(&sha256WithRSA_OID);
+                try builder.appendOID(&sha256WithRSA_OID);
 
                 // Algorithm parameters (RSA requires NULL):
                 try builder.list.append(null_tag);
@@ -300,18 +298,15 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                 switch (ecdsa.Curve) {
                     .P256 => {
                         var ec_sha256_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02 };
-                        try builder.list.append(@intCast(u8, ec_sha256_OID.len));
-                        try builder.list.appendSlice(&ec_sha256_OID);
+                        try builder.appendOID(&ec_sha256_OID);
                     },
                     .P384 => {
                         var ec_sha384_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03 };
-                        try builder.list.append(@intCast(u8, ec_sha384_OID.len));
-                        try builder.list.appendSlice(&ec_sha384_OID);
+                        try builder.appendOID(&ec_sha384_OID);
                     },
                     .P521 => {
                         var ec_sha512_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x04 };
-                        try builder.list.append(@intCast(u8, ec_sha512_OID.len));
-                        try builder.list.appendSlice(&ec_sha512_OID);
+                        try builder.appendOID(&ec_sha512_OID);
                     },
                 }
                 // RFC 5758 3.2:
@@ -323,17 +318,13 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
             .ED25519 => {
                 // Algorithm OID:
                 var ed25519_oid = [_]u8{ 0x2B, 0x65, 0x70 };
-                try builder.list.append(@intCast(u8, ed25519_oid.len));
-                try builder.list.appendSlice(&ed25519_oid);
-
+                try builder.appendOID(&ed25519_oid);
                 // RFC 8410 3: For all of the OIDs, the parameters MUST be absent.
             },
             .ED448 => {
                 // Algorithm OID:
                 var ed448_oid = [_]u8{ 0x2B, 0x65, 0x71 };
-                try builder.list.append(@intCast(u8, ed448_oid.len));
-                try builder.list.appendSlice(&ed448_oid);
-
+                try builder.appendOID(&ed448_oid);
                 // RFC 8410 3: For all of the OIDs, the parameters MUST be absent.
             },
         }
@@ -354,7 +345,6 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
 
 fn encodeSubjectPublicKeyInfo(builder: *derBuilder, public: *Key.PublicKey) !void {
     const sequence: u8 = 0x30;
-    const oid: u8 = 0x06;
     const bitstring: u8 = 0x03;
     const null_tag: u8 = 0x05;
     const integer: u8 = 0x02;
@@ -363,13 +353,11 @@ fn encodeSubjectPublicKeyInfo(builder: *derBuilder, public: *Key.PublicKey) !voi
     {
         // Algorithm identifier:
         var algorithm_identifer = try builder.newPrefixed(sequence);
-        try builder.list.append(oid);
         switch (public.*) {
             .RSA => {
                 // Algorithm OID:
                 const rsa_OID = [_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01 };
-                try builder.list.append(@intCast(u8, rsa_OID.len));
-                try builder.list.appendSlice(&rsa_OID);
+                try builder.appendOID(&rsa_OID);
 
                 // Algorithm parameters (RSA requires NULL):
                 try builder.list.append(null_tag);
@@ -378,43 +366,34 @@ fn encodeSubjectPublicKeyInfo(builder: *derBuilder, public: *Key.PublicKey) !voi
             .ECDSA => |ecdsa| {
                 // Algorithm OID:
                 const ecdsa_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01 };
-                try builder.list.append(@intCast(u8, ecdsa_OID.len));
-                try builder.list.appendSlice(&ecdsa_OID);
+                try builder.appendOID(&ecdsa_OID);
 
                 // Algorithm parameters (named curve):
-                try builder.list.append(oid);
                 switch (ecdsa.Curve) {
                     .P256 => {
                         var p256_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 };
-                        try builder.list.append(@intCast(u8, p256_OID.len));
-                        try builder.list.appendSlice(&p256_OID);
+                        try builder.appendOID(&p256_OID);
                     },
                     .P384 => {
                         var p384_OID = [_]u8{ 0x2B, 0x81, 0x04, 0x00, 0x22 };
-                        try builder.list.append(@intCast(u8, p384_OID.len));
-                        try builder.list.appendSlice(&p384_OID);
+                        try builder.appendOID(&p384_OID);
                     },
                     .P521 => {
                         var p521_OID = [_]u8{ 0x2B, 0x81, 0x04, 0x00, 0x23 };
-                        try builder.list.append(@intCast(u8, p521_OID.len));
-                        try builder.list.appendSlice(&p521_OID);
+                        try builder.appendOID(&p521_OID);
                     },
                 }
             },
             .ED25519 => {
                 // Algorithm OID:
                 var ed25519_oid = [_]u8{ 0x2B, 0x65, 0x70 };
-                try builder.list.append(@intCast(u8, ed25519_oid.len));
-                try builder.list.appendSlice(&ed25519_oid);
-
+                try builder.appendOID(&ed25519_oid);
                 // RFC 8410 3: For all of the OIDs, the parameters MUST be absent.
             },
             .ED448 => {
                 // Algorithm OID:
                 var ed448_oid = [_]u8{ 0x2B, 0x65, 0x71 };
-                try builder.list.append(@intCast(u8, ed448_oid.len));
-                try builder.list.appendSlice(&ed448_oid);
-
+                try builder.appendOID(&ed448_oid);
                 // RFC 8410 3: For all of the OIDs, the parameters MUST be absent.
             },
         }
