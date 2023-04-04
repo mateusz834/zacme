@@ -88,12 +88,16 @@ pub const JWK = union(enum) {
                 errdefer allocator.free(n);
                 return .{ .RSA = .{ .E = e, .N = n } };
             },
-            .ECDSA => |ecdsa| {
-                var x = try encodeBase64(allocator, ecdsa.X);
-                errdefer allocator.free(x);
-                var y = try encodeBase64(allocator, ecdsa.Y);
-                errdefer allocator.free(y);
-                return .{ .ECDSA = .{ .Curve = jwkCurveName(ecdsa.Curve), .X = x, .Y = y } };
+            .ECDSA => |ec| {
+                switch (ec) {
+                    inline else => |ecdsa| {
+                        var x = try encodeBase64(allocator, &ecdsa.X);
+                        errdefer allocator.free(x);
+                        var y = try encodeBase64(allocator, &ecdsa.Y);
+                        errdefer allocator.free(y);
+                        return .{ .ECDSA = .{ .Curve = jwkCurveName(ec), .X = x, .Y = y } };
+                    },
+                }
             },
             .ED25519 => |ed| {
                 var x = try encodeBase64(allocator, &ed.X);
@@ -129,7 +133,7 @@ test "JWK valid for JWK Tumbprint" {
 
     var jwkRSA = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .RSA = .{ .E = testValue1, .N = testValue2 } });
     defer jwkRSA.deinit(std.testing.allocator);
-    var jwkECDSA = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .ECDSA = .{ .Curve = crypto.Key.Type.Curve.P384, .X = testValue1, .Y = testValue2 } });
+    var jwkECDSA = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .ECDSA = .{ .P256 = .{ .X = testValue1[0..32].*, .Y = testValue1[0..32].* } } });
     defer jwkECDSA.deinit(std.testing.allocator);
     var jwkED2519 = try JWK.fromCryptoPublicKey(std.testing.allocator, .{ .ED25519 = .{ .X = testValue1[0..32].* } });
     defer jwkED2519.deinit(std.testing.allocator);
@@ -157,7 +161,7 @@ test "JWK valid for JWK Tumbprint" {
     try std.testing.expectFmt(
         ecdsa,
         "{s}\"crv\":\"{s}\",\"kty\":\"{s}\",\"x\":\"{s}\",\"y\":\"{s}\"{s}",
-        .{ "{", "P-384", "EC", b64TestValue1, b64TestValue2, "}" },
+        .{ "{", "P-256", "EC", b64TestValue1, b64TestValue1, "}" },
     );
 
     try std.testing.expectFmt(

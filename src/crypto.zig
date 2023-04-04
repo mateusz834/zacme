@@ -293,7 +293,7 @@ pub fn buildCSR(allocator: std.mem.Allocator, key: *Key, cn: []const u8, dns_san
                 try builder.list.append(0);
             },
             .ECDSA => |ecdsa| {
-                switch (ecdsa.Curve) {
+                switch (ecdsa) {
                     .P256 => {
                         var ec_sha256_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02 };
                         try builder.appendOID(&ec_sha256_OID);
@@ -367,7 +367,7 @@ fn encodeSubjectPublicKeyInfo(builder: *derBuilder, public: *Key.PublicKey) !voi
                 try builder.appendOID(&ecdsa_OID);
 
                 // Algorithm parameters (named curve):
-                switch (ecdsa.Curve) {
+                switch (ecdsa) {
                     .P256 => {
                         var p256_OID = [_]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 };
                         try builder.appendOID(&p256_OID);
@@ -431,11 +431,15 @@ fn encodeSubjectPublicKeyInfo(builder: *derBuilder, public: *Key.PublicKey) !voi
                     // The first octet of the OCTET STRING indicates whether the key is
                     // compressed or uncompressed.  The uncompressed form is indicated
                     // by 0x04
-
                     try builder.list.append(0x04); // uncompressed form
-                    // x and y coordinates are already padded with zeros.
-                    try builder.list.appendSlice(ecdsa.X);
-                    try builder.list.appendSlice(ecdsa.Y);
+
+                    switch (ecdsa) {
+                        inline .P256, .P384, .P521 => |ec| {
+                            // x and y coordinates are already padded with zeros.
+                            try builder.list.appendSlice(&ec.X);
+                            try builder.list.appendSlice(&ec.Y);
+                        },
+                    }
                 },
                 inline .ED25519, .ED448 => |ed| try builder.list.appendSlice(&ed.X),
             }
@@ -1044,7 +1048,11 @@ pub const Key = struct {
 
     pub const PublicKey = union(enum) {
         RSA: struct { E: []const u8, N: []const u8 },
-        ECDSA: struct { Curve: Type.Curve, X: []const u8, Y: []const u8 },
+        ECDSA: union(Type.Curve) {
+            P256: struct { X: [Type.Curve.P256.size()]u8, Y: [Type.Curve.P256.size()]u8 },
+            P384: struct { X: [Type.Curve.P384.size()]u8, Y: [Type.Curve.P384.size()]u8 },
+            P521: struct { X: [Type.Curve.P521.size()]u8, Y: [Type.Curve.P521.size()]u8 },
+        },
         ED25519: struct { X: [32]u8 },
         ED448: struct { X: [57]u8 },
 
@@ -1054,11 +1062,7 @@ pub const Key = struct {
                     allocator.free(rsa.E);
                     allocator.free(rsa.N);
                 },
-                .ECDSA => |ecdsa| {
-                    allocator.free(ecdsa.X);
-                    allocator.free(ecdsa.Y);
-                },
-                .ED25519, .ED448 => {},
+                .ECDSA, .ED25519, .ED448 => {},
             }
         }
     };
@@ -1072,11 +1076,26 @@ pub const Key = struct {
                 return .{ .RSA = .{ .E = e, .N = n } };
             },
             .ECDSA => |curve| {
-                var size = curve.size();
-                var x = try evp_pkey_get_bignum_param_padded(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_X, size);
-                errdefer allocator.free(x);
-                var y = try evp_pkey_get_bignum_param_padded(allocator, self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_Y, size);
-                return .{ .ECDSA = .{ .Curve = curve, .X = x, .Y = y } };
+                switch (curve) {
+                    .P256 => {
+                        var ret = PublicKey{ .ECDSA = .{ .P256 = .{ .X = undefined, .Y = undefined } } };
+                        try evp_pkey_get_bignum_param_padded(self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_X, &ret.ECDSA.P256.X);
+                        try evp_pkey_get_bignum_param_padded(self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_Y, &ret.ECDSA.P256.Y);
+                        return ret;
+                    },
+                    .P384 => {
+                        var ret = PublicKey{ .ECDSA = .{ .P384 = .{ .X = undefined, .Y = undefined } } };
+                        try evp_pkey_get_bignum_param_padded(self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_X, &ret.ECDSA.P384.X);
+                        try evp_pkey_get_bignum_param_padded(self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_Y, &ret.ECDSA.P384.Y);
+                        return ret;
+                    },
+                    .P521 => {
+                        var ret = PublicKey{ .ECDSA = .{ .P521 = .{ .X = undefined, .Y = undefined } } };
+                        try evp_pkey_get_bignum_param_padded(self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_X, &ret.ECDSA.P521.X);
+                        try evp_pkey_get_bignum_param_padded(self.pkey, openssl.OSSL_PKEY_PARAM_EC_PUB_Y, &ret.ECDSA.P521.Y);
+                        return ret;
+                    },
+                }
             },
             .ED25519 => {
                 var x: [32]u8 = undefined;
@@ -1099,7 +1118,7 @@ pub const Key = struct {
         }
     }
 
-    fn evp_pkey_get_bignum_param_padded(allocator: std.mem.Allocator, pkey: ?*openssl.EVP_PKEY, param: [*c]const u8, size: usize) ![]const u8 {
+    fn evp_pkey_get_bignum_param_padded(pkey: ?*openssl.EVP_PKEY, param: [*c]const u8, buf: []u8) !void {
         var bn: ?*openssl.BIGNUM = null;
 
         var ret = openssl.EVP_PKEY_get_bn_param(pkey, param, &bn);
@@ -1109,16 +1128,11 @@ pub const Key = struct {
         }
         defer openssl.BN_free(bn);
 
-        var bytes = try allocator.alloc(u8, size);
-        errdefer allocator.free(bytes);
-
-        ret = openssl.BN_bn2binpad(bn, &bytes[0], @intCast(c_int, bytes.len));
+        ret = openssl.BN_bn2binpad(bn, &buf[0], @intCast(c_int, buf.len));
         if (ret <= 0) {
             openssl_print_error("failed while retreiving the bignum parameter from key", .{});
             return error.Bn2BinPadFailure;
         }
-
-        return bytes;
     }
 
     fn evp_pkey_get_bignum_param(allocator: std.mem.Allocator, pkey: ?*openssl.EVP_PKEY, param: [*c]const u8) ![]const u8 {
@@ -1226,9 +1240,9 @@ fn testKey(key: Key, sign_data: []const u8, sig: []const u8) !void {
 
 fn verifySignatureFromPublicKeyWithZigCrypto(public: Key.PublicKey, data: []const u8, sig: []const u8) !void {
     switch (public) {
-        .ECDSA => |ecdsa| {
-            switch (ecdsa.Curve) {
-                inline .P256, .P384 => |ecCurve| {
+        .ECDSA => |ec| {
+            switch (ec) {
+                inline .P256, .P384 => |ecdsa, ecCurve| {
                     const ecc = switch (ecCurve) {
                         .P256 => std.crypto.ecc.P256,
                         .P384 => std.crypto.ecc.P384,
@@ -1277,7 +1291,7 @@ fn verifySignatureFromPublicKey(public: *Key.PublicKey, data: []const u8, sig: [
 
     switch (public.*) {
         .RSA => |_| try testVerifySignature(.{ .RSA = 0 }, pkey, data, sig),
-        .ECDSA => |ecdsa| try testVerifySignature(.{ .ECDSA = ecdsa.Curve }, pkey, data, sig),
+        .ECDSA => |ecdsa| try testVerifySignature(.{ .ECDSA = ecdsa }, pkey, data, sig),
         .ED25519 => try testVerifySignature(.ED25519, pkey, data, sig),
         .ED448 => try testVerifySignature(.ED448, pkey, data, sig),
     }
