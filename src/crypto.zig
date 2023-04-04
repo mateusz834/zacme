@@ -11,8 +11,6 @@ const openssl = @cImport({
     @cInclude("openssl.h");
 });
 
-// TODO: ed25519 + ed448
-
 const std = @import("std");
 const log = @import("./log.zig");
 const builtin = @import("builtin");
