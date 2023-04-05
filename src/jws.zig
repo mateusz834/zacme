@@ -27,7 +27,7 @@ const UrlSafeNoPadBase64JsonEncoder = struct {
     pub fn jsonStringify(self: @This(), options: std.json.StringifyOptions, out_stream: anytype) !void {
         var data = self.data;
 
-        const max_process_bytes = 129;
+        const max_process_bytes = 330;
         // Must be div by 3 for correct padding
         std.debug.assert(max_process_bytes % 3 == 0);
 
