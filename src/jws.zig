@@ -21,38 +21,38 @@ fn jwkCurveName(curve: crypto.Key.Type.Curve) []const u8 {
     };
 }
 
-fn ArrayJsonBase64Encoder(comptime length: comptime_int) type {
-    return struct {
-        data: *const [length]u8,
-        pub fn jsonStringify(self: @This(), options: std.json.StringifyOptions, out_stream: anytype) !void {
-            var out: [base64Encoder.calcSize(length)]u8 = undefined;
-            try std.json.stringify(base64Encoder.encode(&out, self.data), options, out_stream);
-        }
-    };
-}
-
-const SliceJsonBase64Encoder = struct {
+const UrlSafeNoPadBase64JsonEncoder = struct {
     data: []const u8,
-    allocator: std.mem.Allocator,
 
     pub fn jsonStringify(self: @This(), options: std.json.StringifyOptions, out_stream: anytype) !void {
-        var out = try self.allocator.alloc(u8, base64Encoder.calcSize(self.data.len));
-        defer self.allocator.free(out);
-        try std.json.stringify(base64Encoder.encode(out, self.data), options, out_stream);
+        var data = self.data;
+
+        const max_process_bytes = 129;
+        // Must be div by 3 for correct padding
+        std.debug.assert(max_process_bytes % 3 == 0);
+
+        var base64_out_buf: [(max_process_bytes / 3) * 4]u8 = undefined;
+
+        try out_stream.writeByte('\"');
+        while (data.len != 0) {
+            const process_len = @min(data.len, max_process_bytes);
+            try std.json.encodeJsonStringChars(base64Encoder.encode(&base64_out_buf, data[0..process_len]), options, out_stream);
+            data = data[process_len..];
+        }
+        try out_stream.writeByte('\"');
     }
 };
 
 pub const JWK = struct {
     public_key: *const crypto.Key.PublicKey,
-    allocator: std.mem.Allocator,
 
     pub fn jsonStringify(self: JWK, options: std.json.StringifyOptions, out_stream: anytype) !void {
         switch (self.public_key.*) {
             .RSA => |val| {
                 return std.json.stringify(.{
-                    .e = SliceJsonBase64Encoder{ .data = val.E, .allocator = self.allocator },
+                    .e = UrlSafeNoPadBase64JsonEncoder{ .data = val.E },
                     .kty = "RSA",
-                    .n = SliceJsonBase64Encoder{ .data = val.N, .allocator = self.allocator },
+                    .n = UrlSafeNoPadBase64JsonEncoder{ .data = val.N },
                 }, options, out_stream);
             },
             .ECDSA => |ec| switch (ec) {
@@ -60,8 +60,8 @@ pub const JWK = struct {
                     return std.json.stringify(.{
                         .crv = jwkCurveName(ecdsa),
                         .kty = "EC",
-                        .x = ArrayJsonBase64Encoder(ecdsa.size()){ .data = &val.X },
-                        .y = ArrayJsonBase64Encoder(ecdsa.size()){ .data = &val.Y },
+                        .x = UrlSafeNoPadBase64JsonEncoder{ .data = &val.X },
+                        .y = UrlSafeNoPadBase64JsonEncoder{ .data = &val.Y },
                     }, options, out_stream);
                 },
             },
@@ -69,14 +69,14 @@ pub const JWK = struct {
                 return std.json.stringify(.{
                     .crv = "Ed25519",
                     .kty = "OKP",
-                    .x = ArrayJsonBase64Encoder(32){ .data = &val.X },
+                    .x = UrlSafeNoPadBase64JsonEncoder{ .data = &val.X },
                 }, options, out_stream);
             },
             .ED448 => |val| {
                 return std.json.stringify(.{
                     .crv = "Ed448",
                     .kty = "OKP",
-                    .x = ArrayJsonBase64Encoder(57){ .data = &val.X },
+                    .x = UrlSafeNoPadBase64JsonEncoder{ .data = &val.X },
                 }, options, out_stream);
             },
         }
@@ -103,10 +103,10 @@ test "JWK valid for JWK Tumbprint" {
     const b64TestValue2 = try encodeBase64(std.testing.allocator, testValue2);
     defer std.testing.allocator.free(b64TestValue2);
 
-    var jwkRSA = JWK{ .public_key = &crypto.Key.PublicKey{ .RSA = .{ .E = testValue1, .N = testValue2 } }, .allocator = std.testing.allocator };
-    var jwkECDSA = JWK{ .public_key = &crypto.Key.PublicKey{ .ECDSA = .{ .P256 = .{ .X = testValue1[0..32].*, .Y = testValue1[0..32].* } } }, .allocator = std.testing.allocator };
-    var jwkED2519 = JWK{ .public_key = &crypto.Key.PublicKey{ .ED25519 = .{ .X = testValue1[0..32].* } }, .allocator = std.testing.allocator };
-    var jwkED448 = JWK{ .public_key = &crypto.Key.PublicKey{ .ED448 = .{ .X = testValue2[0..57].* } }, .allocator = std.testing.allocator };
+    var jwkRSA = JWK{ .public_key = &crypto.Key.PublicKey{ .RSA = .{ .E = testValue1, .N = testValue2 } } };
+    var jwkECDSA = JWK{ .public_key = &crypto.Key.PublicKey{ .ECDSA = .{ .P256 = .{ .X = testValue1[0..32].*, .Y = testValue1[0..32].* } } } };
+    var jwkED2519 = JWK{ .public_key = &crypto.Key.PublicKey{ .ED25519 = .{ .X = testValue1[0..32].* } } };
+    var jwkED448 = JWK{ .public_key = &crypto.Key.PublicKey{ .ED448 = .{ .X = testValue2[0..57].* } } };
 
     var rsa = try std.json.stringifyAlloc(std.testing.allocator, jwkRSA, .{});
     defer std.testing.allocator.free(rsa);
@@ -169,10 +169,7 @@ pub fn withJWK(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, 
         .alg = jwsAlgName(key),
         .nonce = nonce,
         .url = url,
-        .jwk = .{
-            .public_key = &public,
-            .allocator = allocator,
-        },
+        .jwk = .{ .public_key = &public },
     });
 }
 
@@ -208,18 +205,9 @@ fn jws(allocator: std.mem.Allocator, key: crypto.Key, payload: anytype, hdrs: he
     var sign = try key.sign(allocator, signData, false);
     defer allocator.free(sign);
 
-    var signatureBase64 = try allocator.alloc(u8, base64Encoder.calcSize(sign.len));
-    defer allocator.free(signatureBase64);
-
-    const jwsWebSignature = struct {
-        protected: []const u8,
-        payload: []const u8,
-        signature: []const u8,
-    };
-
-    return try std.json.stringifyAlloc(allocator, jwsWebSignature{
+    return try std.json.stringifyAlloc(allocator, .{
         .protected = headersBase64,
         .payload = payloadBase64,
-        .signature = base64Encoder.encode(signatureBase64, sign),
+        .signature = UrlSafeNoPadBase64JsonEncoder{ .data = sign },
     }, .{});
 }
