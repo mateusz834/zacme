@@ -24,7 +24,7 @@ fn jwkCurveName(curve: crypto.Key.Type.Curve) []const u8 {
 const UrlSafeNoPadBase64JsonEncoder = struct {
     data: []const u8,
 
-    pub fn jsonStringify(self: @This(), options: std.json.StringifyOptions, out_stream: anytype) !void {
+    pub fn jsonStringify(self: @This(), _: std.json.StringifyOptions, out_stream: anytype) !void {
         var data = self.data;
 
         const max_process_bytes = 330;
@@ -36,7 +36,7 @@ const UrlSafeNoPadBase64JsonEncoder = struct {
         try out_stream.writeByte('\"');
         while (data.len != 0) {
             const process_len = @min(data.len, max_process_bytes);
-            try std.json.encodeJsonStringChars(base64Encoder.encode(&base64_out_buf, data[0..process_len]), options, out_stream);
+            try out_stream.writeAll(base64Encoder.encode(&base64_out_buf, data[0..process_len]));
             data = data[process_len..];
         }
         try out_stream.writeByte('\"');
